@@ -2,6 +2,8 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import {
   EMPTY_TREE,
+  fetchAll,
+  fetchHeadPath,
   loadBranchCompare,
   loadPatch,
   loadStat,
@@ -24,7 +26,8 @@ const record = (sha: string, time: number, subject: string, stat = '', body = ''
 
 const result = (stdout: string, exitCode = 0, stderr = '') => ({ exitCode, stdout, stderr })
 
-const ref = (refname: string, short: string, time: number, symref = '') => [refname, short, String(time), symref].join(US)
+const ref = (refname: string, short: string, time: number, symref = '', sha = 'a'.repeat(40)) =>
+  [refname, short, String(time), symref, sha].join(US)
 
 describe('reading git output', () => {
   test('parseLog reads each commit with its lines changed, oldest first', () => {
@@ -79,8 +82,8 @@ describe('reading git output', () => {
     ].join('\n')
 
     expect(parseBranches(`${out}\n`)).toEqual([
-      { name: 'main', time: 300, isRemote: false },
-      { name: 'origin/main', time: 400, isRemote: true },
+      { name: 'main', ref: 'refs/heads/main', sha: 'a'.repeat(40), time: 300, isRemote: false },
+      { name: 'origin/main', ref: 'refs/remotes/origin/main', sha: 'a'.repeat(40), time: 400, isRemote: true },
     ])
   })
 
@@ -204,6 +207,56 @@ describe('loading from git', () => {
     expect(out.defaultBase).toBe('origin/main')
     expect(logs[0]).toContain('--first-parent')
     expect(logs[0]).toContain('--shortstat')
+    expect(out.viewing).toBe('')
+    // The checked-out branch is read as HEAD: no ref after the options.
+    expect(logs[0]?.slice(-1)).toEqual(['--shortstat'])
+  })
+
+  test('loadTimeline: another branch is read by its full ref, without a checkout, and has no uncommitted changes', async () => {
+    const { run, logs } = repo()
+    const out = await loadTimeline(run, 'origin/main', 120)
+
+    expect(out).toMatchObject({ status: 'ready', branch: 'feature', viewing: 'origin/main', hasWorking: false })
+    // `--` after the ref: it can be taken neither for an option nor for a file.
+    expect(logs[0]?.slice(-2)).toEqual(['refs/remotes/origin/main', '--'])
+    expect(logs[0]).toContain('120')
+  })
+
+  test('loadTimeline: the checked-out branch by name, or one that is gone, is the checked-out branch', async () => {
+    const { run, logs } = repo()
+
+    expect(await loadTimeline(run, 'feature')).toMatchObject({ viewing: '', hasWorking: true })
+    expect(await loadTimeline(run, 'deleted-long-ago')).toMatchObject({ viewing: '', hasWorking: true })
+    expect(logs.every(argv => !argv.some(arg => arg.startsWith('refs/')))).toBe(true)
+  })
+
+  test('fetchHeadPath: git’s path made absolute from the folder it ran in', async () => {
+    const answer = (stdout: string, exitCode = 0): Run => async () => result(stdout, exitCode)
+
+    expect(await fetchHeadPath(answer('.git/FETCH_HEAD\n'), '/repo/')).toBe('/repo/.git/FETCH_HEAD')
+    expect(await fetchHeadPath(answer('../.git/FETCH_HEAD\n'), '/repo/src')).toBe('/repo/src/../.git/FETCH_HEAD')
+    expect(await fetchHeadPath(answer('/abs/.git/FETCH_HEAD\n'), '/repo')).toBe('/abs/.git/FETCH_HEAD')
+    expect(await fetchHeadPath(answer('C:/x/.git/FETCH_HEAD\n'), 'C:\\x')).toBe('C:/x/.git/FETCH_HEAD')
+    expect(await fetchHeadPath(answer('', 128), '/repo')).toBe('')
+  })
+
+  test('fetchAll: fetches every remote and prunes, and says why when git refuses', async () => {
+    const calls: string[][] = []
+    const ok: Run = async argv => {
+      calls.push([...argv])
+
+      return result('Fetching origin\n')
+    }
+
+    await fetchAll(ok)
+
+    expect(calls).toEqual([['git', 'fetch', '--all', '--prune']])
+
+    const refused: Run = async () =>
+      result('', 1, "remote: HTTP Basic: Access denied\nfatal: Authentication failed for 'https://gitlab.example/x.git/'\nerror: Could not fetch origin\n")
+
+    await expect(fetchAll(refused)).rejects.toThrow("fatal: Authentication failed for 'https://gitlab.example/x.git/'")
+    await expect(fetchAll(async () => result('', 1))).rejects.toThrow('git fetch failed')
   })
 
   test('loadTimeline: a root commit is compared with the empty tree, and the base falls back to a main branch', async () => {

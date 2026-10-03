@@ -1,7 +1,7 @@
 {
   "name": "git-diff-timeline",
-  "version": "0.5.0",
-  "description": "Git Diff timeline above the prompt: click a commit to see it, click two to compare them, with their commit messages; a Branches tab compares two branches; a GitHub-style files view shows each file's diff. Works with any git remote.",
+  "version": "0.6.0",
+  "description": "Git Diff timeline above the prompt: view any branch's history without switching to it, scroll back through it, click a commit to see it, click two to compare them, with their commit messages; says when the remote branches were fetched, with a Fetch button; a Branches tab compares two branches; a GitHub-style files view shows each file's diff. Works with any git remote.",
   "types": "./types/index.d.ts",
   "userConfig": {
     "position": {

@@ -4,15 +4,16 @@ import type { ElementTable, EngineInterface, Register, RenderElement, RenderSurf
 import type { GitDiffCommit, GitDiffFile, GitDiffPatch, GitDiffStat, GitDiffTimeline } from '../types'
 import { branchCard, historyCard } from './card'
 import type { CardNode } from './card'
-import { EMPTY_TREE, LOG_LIMIT, loadBranchCompare, loadPatch, loadStat, loadTimeline } from './git'
+import { EMPTY_TREE, LOG_LIMIT, MAX_LOG, fetchAll, fetchHeadPath, loadBranchCompare, loadPatch, loadStat, loadTimeline } from './git'
 import type { Loaded, Run } from './git'
-import { ARROW_W, SLOT_W, dayLabels, formatTime, resolveStart, shortDate, stepStart, visibleCount } from './layout'
+import { ARROW_W, SLOT_W, centerStart, dayLabels, formatTime, resolveStart, shortDate, stepStart, visibleCount } from './layout'
 import {
   INITIAL,
   WORKING,
   buttonLabel,
   clickCommit,
   commitTitle,
+  describeFetch,
   describeStat,
   diffSpec,
   merge,
@@ -20,6 +21,7 @@ import {
   rangeCommits,
   refOf,
   selectionKey,
+  settleFetch,
 } from './model'
 
 type Kit = Pick<ElementTable<'terminal'>, 'Box' | 'Text' | 'Button' | 'Code'> & {
@@ -37,6 +39,11 @@ type Actions = {
   pickBranch: (side: 'base' | 'compare', name: string) => void
   swap: () => void
   step: (delta: number, count: number) => void
+  /** Show another branch's history; '' is the checked-out one. */
+  viewBranch: (name: string) => void
+  /** Scroll the timeline to node `index`, in a window of `count` nodes. */
+  goTo: (index: number, count: number) => void
+  fetch: () => void
   toggleFile: (path: string) => void
 }
 
@@ -46,6 +53,10 @@ const PANE_ARGS = { id: PANE, title: 'Git Diff', rows: 24, columns: 96 } as cons
 /** Tools whose calls can change what git sees. */
 const WATCHED = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash'])
 const REFRESH_DELAY_MS = 1200
+/** A fetch may take a while on a slow remote. */
+const FETCH_TIMEOUT_MS = 120_000
+/** Remote branches older than this, in seconds, are shown as stale. */
+const STALE_AFTER_S = 86_400
 /** Files the files view lists, and diffs it holds open at once. */
 const MAX_FILES = 100
 const MAX_OPEN = 4
@@ -60,6 +71,7 @@ const ACCENT = 'claude'
 const ADDED = 'success'
 const DELETED = 'error'
 const ERROR = 'error'
+const WARNING = 'warning'
 
 const timeline = atom({ plugin: 'git-diff-timeline', key: 'timeline' } as const, INITIAL)
 
@@ -83,10 +95,10 @@ const kitOf = (ui: ElementTable, surface: RenderSurface): Kit => ({
   Svg: surface !== 'terminal' && 'Svg' in ui ? ui.Svg : null,
 })
 
-const runnerFor = async ($: EngineInterface): Promise<Run> => {
+const runnerFor = async ($: EngineInterface, init: { timeoutMs?: number; env?: Record<string, string> } = {}): Promise<Run> => {
   const cwd = await $.session.cwd()
 
-  return argv => $.process.run(argv, { cwd, timeoutMs: 15_000 })
+  return argv => $.process.run(argv, { cwd, timeoutMs: 15_000, ...init })
 }
 
 /** The files open after a fresh read: the first file for a new pick, else those still changed. */
@@ -182,9 +194,34 @@ const loadSelection = async ($: EngineInterface, force: boolean) => {
   await loadPatches($, force)
 }
 
+/**
+ * When the repository last fetched, read from the file git rewrites on every fetch. The
+ * remote branches (`origin/main`) are copies as of then: git never updates them by itself.
+ */
+const loadFreshness = async ($: EngineInterface, run: Run, cwd: string) => {
+  const t = await read($, timeline)
+  let fetchedAt = 0
+  let isStale = false
+
+  try {
+    const path = t.branches.some(branch => branch.isRemote) ? await fetchHeadPath(run, cwd) : ''
+
+    if (path !== '') {
+      fetchedAt = Math.floor((await $.fs.stat(path)).mtimeMs / 1000)
+      isStale = Math.floor((await $.clock.now()) / 1000) - fetchedAt > STALE_AFTER_S
+    }
+  } catch {
+    // No FETCH_HEAD yet (never fetched since the clone), or git did not say: the age is unknown.
+  }
+
+  await update($, timeline, cur => ({ ...cur, fetchedAt, isStale }))
+}
+
 const refresh = async ($: EngineInterface) => {
   const cwd = await $.session.cwd()
   const run = await runnerFor($)
+  const was = await read($, timeline)
+  const isSameRepo = was.cwd === cwd
   const failed = (error: unknown): Loaded => ({
     status: 'error',
     message: errorText(error),
@@ -195,10 +232,12 @@ const refresh = async ($: EngineInterface) => {
     baseOfOldest: '',
     branches: [],
     defaultBase: '',
+    viewing: '',
   })
-  const loaded = await loadTimeline(run).catch(failed)
+  const loaded = await loadTimeline(run, isSameRepo ? was.viewing : '', isSameRepo ? was.limit : LOG_LIMIT).catch(failed)
 
   await update($, timeline, prev => merge(prev, loaded, cwd))
+  await loadFreshness($, run, cwd)
   await loadSelection($, true)
 }
 
@@ -248,8 +287,94 @@ const toggleFile = async ($: EngineInterface, path: string) => {
   await loadPatches($, false)
 }
 
-const step = ($: EngineInterface, delta: number, count: number) =>
-  update($, timeline, t => ({ ...t, start: stepStart(t.start, delta, count, nodeIds(t).length) }))
+/** Whether git may hold commits older than the timeline has, and the timeline may still grow. */
+const canLoadOlder = (t: GitDiffTimeline) => t.hasMore && t.limit < MAX_LOG
+
+let isLoadingOlder = false
+
+/** Reads another page of older commits, and pages the window back onto them. */
+const loadOlder = async ($: EngineInterface, count: number) => {
+  if (isLoadingOlder) {
+    return
+  }
+
+  isLoadingOlder = true
+
+  try {
+    // The window is pinned to its commits first, so the commits that come in before them move nothing.
+    await update($, timeline, t => ({
+      ...t,
+      limit: Math.min(MAX_LOG, t.limit + LOG_LIMIT),
+      start: resolveStart(t.start, count, nodeIds(t).length),
+    }))
+    await refresh($)
+    await update($, timeline, t => ({ ...t, start: stepStart(t.start, -1, count, nodeIds(t).length) }))
+  } finally {
+    isLoadingOlder = false
+  }
+}
+
+/** One page left or right. Left of the oldest commit loaded, it reads older ones. */
+const step = async ($: EngineInterface, delta: number, count: number) => {
+  const t = await read($, timeline)
+
+  if (delta < 0 && canLoadOlder(t) && resolveStart(t.start, count, nodeIds(t).length) === 0) {
+    await loadOlder($, count)
+
+    return
+  }
+
+  await update($, timeline, cur => ({ ...cur, start: stepStart(cur.start, delta, count, nodeIds(cur).length) }))
+}
+
+/** Shows another branch's history. It reads the branch as it is: nothing is checked out. */
+const viewBranch = async ($: EngineInterface, name: string) => {
+  await update($, timeline, t => ({
+    ...t,
+    viewing: name,
+    limit: LOG_LIMIT,
+    start: -1,
+    isPinned: false,
+    anchor: '',
+    stat: null,
+    statKey: '',
+    statError: '',
+    open: [],
+    patches: [],
+  }))
+  await refresh($)
+}
+
+const goTo = (index: number, count: number, $: EngineInterface) =>
+  index < 0 ? Promise.resolve() : update($, timeline, t => ({ ...t, start: centerStart(index, count, nodeIds(t).length) }))
+
+/**
+ * Brings the remote branches up to date. Only a person's press starts it: a fetch reaches the
+ * network, and may ask for a password.
+ */
+const fetchRemotes = async ($: EngineInterface) => {
+  const before = await read($, timeline)
+
+  if (before.fetch === 'running') {
+    return
+  }
+
+  await update($, timeline, t => ({ ...t, fetch: 'running' as const, fetchNote: '' }))
+
+  try {
+    await fetchAll(await runnerFor($, { timeoutMs: FETCH_TIMEOUT_MS, env: { GIT_TERMINAL_PROMPT: '0' } }))
+  } catch (error) {
+    await update($, timeline, t => ({ ...t, fetch: 'failed' as const, fetchNote: `Fetch failed: ${errorText(error)}` }))
+
+    return
+  }
+
+  await refresh($).catch(() => undefined)
+
+  const after = await read($, timeline)
+
+  await update($, timeline, t => ({ ...t, fetch: 'idle' as const, fetchNote: describeFetch(before.branches, after.branches) }))
+}
 
 const actionsFor = ($: EngineInterface): Actions => ({
   refresh: () => void refresh($).catch(() => undefined),
@@ -258,7 +383,10 @@ const actionsFor = ($: EngineInterface): Actions => ({
   pickCommit: index => void pickCommit($, index),
   pickBranch: (side, name) => void pickBranch($, side, name),
   swap: () => void show($, t => ({ ...t, base: t.compare, compare: t.base })),
-  step: (delta, count) => void step($, delta, count),
+  step: (delta, count) => void step($, delta, count).catch(() => undefined),
+  viewBranch: name => void viewBranch($, name).catch(() => undefined),
+  goTo: (index, count) => void goTo(index, count, $),
+  fetch: () => void fetchRemotes($),
   toggleFile: path => void toggleFile($, path),
 })
 
@@ -302,7 +430,9 @@ const clickHint = (t: GitDiffTimeline) => {
 }
 
 const rangeTitle = (t: GitDiffTimeline) =>
-  t.mode === 'branches' ? `${t.base} ← ${t.compare}` : `${nodeName(t, t.from)} → ${nodeName(t, t.to)}`
+  t.mode === 'branches'
+    ? `${t.base} ← ${t.compare}`
+    : `${t.viewing === '' ? '' : `${t.viewing} · `}${nodeName(t, t.from)} → ${nodeName(t, t.to)}`
 
 const roleOf = (t: GitDiffTimeline, index: number): CardNode['role'] =>
   index === t.to ? 'compare' : index === t.from ? 'base' : index > t.from && index < t.to ? 'between' : 'outside'
@@ -316,11 +446,88 @@ const windowOf = (t: GitDiffTimeline, columns: number) => {
   return { total, count, start, indexes: Array.from({ length: Math.min(count, total) }, (_, i) => start + i) }
 }
 
+/** The branches to compare, newest first as git sorts them; a long list is cut, the picked ones kept. */
 const branchOptions = (t: GitDiffTimeline) =>
-  t.branches.map(branch => ({
-    value: branch.name,
-    label: branch.name === t.branch ? `${branch.name} (current)` : branch.name,
-  }))
+  capped(
+    t.branches.map(branch => ({
+      value: branch.name,
+      label: branch.name === t.branch ? `${branch.name} (current)` : branch.name,
+    })),
+    [t.base, t.compare, t.branch],
+  )
+
+const clip = (text: string, length: number) => (text.length > length ? `${text.slice(0, length - 1)}…` : text)
+
+/**
+ * The branches whose history can be shown: the checked-out one is '' (kept apart when HEAD is
+ * detached). A long list is cut to the newest, the checked-out and the shown kept.
+ */
+const viewOptions = (t: GitDiffTimeline) => {
+  const options = t.branches.map(branch =>
+    branch.name === t.branch
+      ? { value: '', label: `${branch.name} (current)` }
+      : { value: branch.name, label: branch.name },
+  )
+
+  return capped(
+    t.branches.some(branch => branch.name === t.branch) ? options : [{ value: '', label: `${t.branch} (current)` }, ...options],
+    ['', t.viewing],
+  )
+}
+
+/** A Select takes 1 to 64 options; more, and the engine refuses the whole band. */
+const MAX_OPTIONS = 64
+
+/** At most MAX_OPTIONS of `options`, in their order: those named in `keep`, then the first of the rest. */
+const capped = <T extends { value: string }>(options: readonly T[], keep: readonly string[]): readonly T[] => {
+  if (options.length <= MAX_OPTIONS) {
+    return options
+  }
+
+  const mustKeep = options.filter(option => keep.includes(option.value))
+  const room = MAX_OPTIONS - mustKeep.length
+  const chosen = new Set([
+    ...mustKeep,
+    ...options.filter(option => !keep.includes(option.value)).slice(0, room),
+  ])
+
+  return options.filter(option => chosen.has(option))
+}
+
+/**
+ * The nodes to scroll to, newest first: all of them, or when there are more than a Select takes,
+ * 64 spread evenly from the newest to the oldest.
+ */
+const jumpIndexes = (total: number): number[] => {
+  const stride = total <= MAX_OPTIONS ? 1 : (total - 1) / (MAX_OPTIONS - 1)
+
+  return Array.from({ length: Math.min(total, MAX_OPTIONS) }, (_, k) => Math.round((Math.min(total, MAX_OPTIONS) - 1 - k) * stride))
+}
+
+/**
+ * The list to scroll by, each node by its day, button label and title, and the one nearest the
+ * middle of the window: where the person is.
+ */
+const jumpList = (t: GitDiffTimeline, middle: number) => {
+  const ids = nodeIds(t)
+  const indexes = jumpIndexes(ids.length)
+  const nearest = indexes.reduce((best, i) => (Math.abs(i - middle) < Math.abs(best - middle) ? i : best), indexes[0] ?? 0)
+
+  return {
+    value: ids[nearest] ?? '',
+    options: indexes.map(i => {
+      const commit = t.commits[i]
+
+      return {
+        value: ids[i] ?? '',
+        label:
+          commit === undefined
+            ? 'Now · uncommitted changes'
+            : clip(`${shortDate(commit.time)} · ${buttonLabel(commit)} · ${commitTitle(commit)}`, 72),
+      }
+    }),
+  }
+}
 
 /**
  * A view tab: the open one a plain button, the other quiet. Not `primary`: that marks the
@@ -328,11 +535,67 @@ const branchOptions = (t: GitDiffTimeline) =>
  */
 const tabLook = (isOpen: boolean) => (isOpen ? { variant: 'secondary' as const } : { plain: true as const, dimColor: true })
 
+/**
+ * How old the remote branches are, and a way to bring them up to date. `origin/main` is this
+ * computer's copy of the server's main as of the last fetch: it is never live, so the chip says when.
+ */
+const remoteChip = (t: GitDiffTimeline, on: Actions, { Box, Text, Button }: Pick<Kit, 'Box' | 'Text' | 'Button'>) => {
+  if (!t.branches.some(branch => branch.isRemote)) {
+    return null
+  }
+
+  if (t.fetch === 'running') {
+    return <Text dimColor>Fetching…</Text>
+  }
+
+  return (
+    <Box flexDirection="row" columnGap={1} alignItems="center">
+      {t.fetch === 'failed' ? (
+        <Text color={ERROR}>{t.fetchNote}</Text>
+      ) : t.fetchedAt === 0 ? (
+        <Text dimColor>Remotes: last fetch unknown</Text>
+      ) : (
+        <Text {...(t.isStale ? { color: WARNING } : { dimColor: true })}>
+          {`Remotes fetched ${when(t.fetchedAt)}${t.fetchNote === '' ? '' : ` · ${t.fetchNote}`}`}
+        </Text>
+      )}
+      <Button key="fetch" plain label="Fetch" onPress={on.fetch} />
+    </Box>
+  )
+}
+
 /** The strip's first row: History or Branches, how to pick, the files view and a refresh. */
-const controls = ({ Box, Text, Button, Select }: Kit, t: GitDiffTimeline, on: Actions): RenderElement => {
+const controls = (
+  { Box, Text, Button, Select }: Kit,
+  t: GitDiffTimeline,
+  on: Actions,
+  win: ReturnType<typeof windowOf>,
+): RenderElement => {
   const isHistory = t.mode === 'history'
+  const ids = nodeIds(t)
+  const jump = jumpList(t, Math.min(win.total - 1, win.start + Math.floor(win.indexes.length / 2)))
   const pickers = isHistory ? (
-    <Text dimColor>{clickHint(t)}</Text>
+    <Box flexDirection="row" columnGap={1} alignItems="center" flexWrap="wrap">
+      {Select !== null && t.branches.length > 0 && (
+        <Select
+          key="view-branch"
+          label="Branch"
+          options={viewOptions(t)}
+          value={t.viewing}
+          onSelect={name => on.viewBranch(name)}
+        />
+      )}
+      {Select !== null && ids.length > win.count && (
+        <Select
+          key="go-to"
+          label="Go to"
+          options={jump.options}
+          value={jump.value}
+          onSelect={id => on.goTo(ids.indexOf(id), win.count)}
+        />
+      )}
+      <Text dimColor>{clickHint(t)}</Text>
+    </Box>
   ) : Select === null ? null : t.branches.length === 0 ? (
       <Text dimColor>No branches to compare.</Text>
     ) : (
@@ -363,7 +626,8 @@ const controls = ({ Box, Text, Button, Select }: Kit, t: GitDiffTimeline, on: Ac
         <Button key="mode:branches" label="Branches" {...tabLook(!isHistory)} onPress={() => on.mode('branches')} />
         {pickers}
       </Box>
-      <Box flexDirection="row" columnGap={1}>
+      <Box flexDirection="row" columnGap={1} alignItems="center" flexWrap="wrap">
+        {remoteChip(t, on, { Box, Text, Button })}
         <Button key="details" label="Files changed" onPress={on.details} />
         <Button key="refresh" plain label="↻" onPress={on.refresh} />
       </Box>
@@ -420,9 +684,15 @@ const trackRow = (kit: Kit, t: GitDiffTimeline, indexes: number[]): RenderElemen
 }
 
 /** History: the card (a slider in text on the terminal), and under it a button per commit. */
-const historyStrip = (kit: Kit, t: GitDiffTimeline, columns: number, on: Actions): RenderElement => {
+const historyStrip = (
+  kit: Kit,
+  t: GitDiffTimeline,
+  columns: number,
+  on: Actions,
+  win: ReturnType<typeof windowOf>,
+): RenderElement => {
   const { Box, Button, Svg } = kit
-  const { total, count, start, indexes } = windowOf(t, columns)
+  const { total, count, start, indexes } = win
   const labels = dayLabels(indexes.map(i => t.commits[i]?.time ?? null))
   const nodes: CardNode[] = indexes.map((i, k) => {
     const commit = t.commits[i]
@@ -437,7 +707,7 @@ const historyStrip = (kit: Kit, t: GitDiffTimeline, columns: number, on: Actions
           tip: `${commit.short} · ${commitTitle(commit)} · +${commit.added} −${commit.deleted}`,
         }
   })
-  const title = `${t.branch} · ${plural(t.commits.length, 'commit')}${t.commits.length >= LOG_LIMIT ? ' shown' : ''}`
+  const title = `${t.viewing === '' ? t.branch : t.viewing} · ${t.commits.length}${t.hasMore ? '+' : ''} commit${t.commits.length === 1 ? '' : 's'}`
   const picture =
     Svg === null ? (
       <Box flexDirection="column">
@@ -454,6 +724,14 @@ const historyStrip = (kit: Kit, t: GitDiffTimeline, columns: number, on: Actions
           stats: describeStat(t.stat),
           older: start,
           newer: total - start - indexes.length,
+          overview: {
+            total,
+            first: start,
+            last: start + indexes.length - 1,
+            pickFrom: t.from,
+            pickTo: t.to,
+            more: t.hasMore,
+          },
         })}
         alt={`${title}: ${rangeTitle(t)}`}
       />
@@ -464,7 +742,7 @@ const historyStrip = (kit: Kit, t: GitDiffTimeline, columns: number, on: Actions
       {picture}
       <Box flexDirection="row">
         <Box width={ARROW_W}>
-          <Button key="prev" plain dimColor={start === 0} label="‹" onPress={() => on.step(-1, count)} />
+          <Button key="prev" plain dimColor={start === 0 && !canLoadOlder(t)} label="‹" onPress={() => on.step(-1, count)} />
         </Box>
         {indexes.map(i => {
           const commit = t.commits[i]
@@ -555,11 +833,12 @@ const branchStrip = (kit: Kit, t: GitDiffTimeline, columns: number): RenderEleme
 
 const strip = (kit: Kit, t: GitDiffTimeline, columns: number, on: Actions): RenderElement => {
   const { Box } = kit
+  const win = windowOf(t, columns)
 
   return (
     <Box flexDirection="column">
-      {controls(kit, t, on)}
-      {t.mode === 'history' ? historyStrip(kit, t, columns, on) : branchStrip(kit, t, columns)}
+      {controls(kit, t, on, win)}
+      {t.mode === 'history' ? historyStrip(kit, t, columns, on, win) : branchStrip(kit, t, columns)}
     </Box>
   )
 }
@@ -772,6 +1051,8 @@ const scheduleRefresh = ($: EngineInterface) => {
 
 const begin = async ($: EngineInterface) => {
   try {
+    // A reload in the middle of a fetch leaves "Fetching…" in the state, with nothing left to end it.
+    await update($, timeline, settleFetch)
     await refresh($)
 
     if (position === 'band') {

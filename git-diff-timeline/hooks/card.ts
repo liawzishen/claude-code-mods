@@ -103,6 +103,19 @@ export type CardNode = {
 
 export type CardStats = { files: string; added: string; deleted: string } | null
 
+/** Where the window sits in the history loaded, as nodes counted from the oldest. */
+export type CardOverview = {
+  total: number
+  /** The window's first and last node. */
+  first: number
+  last: number
+  /** The compared pair. */
+  pickFrom: number
+  pickTo: number
+  /** True when git holds older commits than are loaded. */
+  more: boolean
+}
+
 export type HistoryCardInput = {
   /** The band's width in cells: the card spans it. */
   columns: number
@@ -115,6 +128,8 @@ export type HistoryCardInput = {
   /** Commits beyond the view on each side. */
   older: number
   newer: number
+  /** When given, a small scroll bar in the top right tells where the window sits. */
+  overview?: CardOverview
 }
 
 export type BranchCardInput = {
@@ -247,12 +262,50 @@ const corner = (text: string, x: number, room: number, anchor: 'start' | 'end') 
     ? ''
     : `<text x="${r(x)}" y="${PILL_Y + 5}" font-size="${SIDE_SIZE}" text-anchor="${anchor}"${fillOf('muted')}>${esc(text)}</text>`
 
+/** Length of the scroll bar, in viewBox units. */
+const SCROLL_LEN = 96
+
+/**
+ * A small scroll bar in the top right: the history loaded, the window over it framed, the compared
+ * pair lit, and in words where the window is. Nothing when the whole history is in view.
+ */
+const scrollMark = (right: number, room: number, o: CardOverview) => {
+  if (o.total <= 0 || (o.first <= 0 && o.last >= o.total - 1 && !o.more)) {
+    return ''
+  }
+
+  const text = `${o.first + 1}–${o.last + 1} of ${o.total}${o.more ? '+' : ''}`
+  const textW = widthOf(text, SIDE_SIZE)
+
+  if (textW > room) {
+    return ''
+  }
+
+  const label = `<text x="${r(right)}" y="${PILL_Y + 5}" font-size="${SIDE_SIZE}" text-anchor="end"${fillOf('muted')}>${esc(text)}</text>`
+
+  if (room < textW + 12 + SCROLL_LEN) {
+    return label
+  }
+
+  const x0 = right - textW - 12 - SCROLL_LEN
+  const at = (node: number) => x0 + (SCROLL_LEN * node) / o.total
+  const pickX = at(Math.max(0, o.pickFrom))
+  const thumbX = at(o.first)
+
+  return (
+    label +
+    `<rect x="${r(x0)}" y="${PILL_Y - 3}" width="${SCROLL_LEN}" height="6" rx="3"${fillOf('groove')}/>` +
+    `<rect data-scroll="pick" x="${r(pickX)}" y="${PILL_Y - 3}" width="${r(Math.max(3, at(o.pickTo + 1) - pickX))}" height="6" rx="3"${fillOf('accent')}/>` +
+    `<rect data-scroll="window" x="${r(thumbX)}" y="${PILL_Y - 5}" width="${r(Math.max(6, at(o.last + 1) - thumbX))}" height="10" rx="4" fill="none"${strokeOf('soft')} stroke-width="1.4"/>`
+  )
+}
+
 /**
  * History: a range slider over the commits in view, with a bar of each commit's size above
  * it. The pick is the lit span between two knobs; the commits whose changes it takes in
  * have their bars lit too.
  */
-export const historyCard = ({ columns, nodes, title, range, stats, older, newer }: HistoryCardInput): string => {
+export const historyCard = ({ columns, nodes, title, range, stats, older, newer, overview }: HistoryCardInput): string => {
   const width = columns * CELL
   const left = EDGE
   const right = width - EDGE
@@ -282,7 +335,7 @@ export const historyCard = ({ columns, nodes, title, range, stats, older, newer 
     open(width, `${title}: ${range.from} to ${range.to}`),
     pill.svg,
     corner(title, 24, sideRoom, 'start'),
-    corner(beyond, width - 24, sideRoom, 'end'),
+    overview === undefined ? corner(beyond, width - 24, sideRoom, 'end') : scrollMark(width - 24, sideRoom, overview),
   ]
 
   nodes.forEach((node, i) => {

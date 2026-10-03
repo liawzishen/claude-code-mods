@@ -9,6 +9,7 @@ import {
   clickCommit,
   commitRange,
   commitTitle,
+  describeFetch,
   describeStat,
   diffSpec,
   merge,
@@ -16,6 +17,7 @@ import {
   rangeCommits,
   refOf,
   selectionKey,
+  settleFetch,
 } from '../hooks/model'
 
 const commit = (n: number) => ({
@@ -28,11 +30,15 @@ const commit = (n: number) => ({
   deleted: 0,
 })
 
-const BRANCHES = [
-  { name: 'main', time: 3, isRemote: false },
-  { name: 'feature', time: 2, isRemote: false },
-  { name: 'origin/main', time: 1, isRemote: true },
-]
+const branch = (name: string, sha: string, time: number, isRemote = false) => ({
+  name,
+  ref: `${isRemote ? 'refs/remotes' : 'refs/heads'}/${name}`,
+  sha,
+  time,
+  isRemote,
+})
+
+const BRANCHES = [branch('main', 'm1', 3), branch('feature', 'f1', 2), branch('origin/main', 'o1', 1, true)]
 
 const loaded = (count: number, hasWorking = false): Loaded => ({
   status: 'ready',
@@ -44,6 +50,7 @@ const loaded = (count: number, hasWorking = false): Loaded => ({
   baseOfOldest: 'parent0',
   branches: BRANCHES,
   defaultBase: 'origin/main',
+  viewing: '',
 })
 
 const ready = (count: number, hasWorking = false): GitDiffTimeline => merge(INITIAL, loaded(count, hasWorking), '/repo')
@@ -190,5 +197,68 @@ describe('words', () => {
       '!123 Add the map',
     )
     expect(commitTitle({ ...commit(1), subject: 'Fix the map', body: 'Details' })).toBe('Fix the map')
+  })
+})
+
+describe('scrolling and branches', () => {
+  const at = (t: GitDiffTimeline, n: number) => nodeIds(t)[n]
+
+  test('older commits loaded in front of the window move nothing: it stays on the same commits', () => {
+    const paged = { ...ready(8), start: 3, limit: 8 }
+    const older = { ...loaded(8) }
+    const more = { ...older, commits: [...Array.from({ length: 4 }, (_, i) => commit(100 + i)), ...older.commits] }
+    const next = merge(paged, more, '/repo')
+
+    expect(next.commits).toHaveLength(12)
+    expect(at(next, next.start)).toBe(at(paged, 3))
+    expect(next.start).toBe(7)
+  })
+
+  test('a window that follows the newest keeps following it, and one whose commit is gone follows it too', () => {
+    expect(merge({ ...ready(8), start: -1 }, loaded(9), '/repo').start).toBe(-1)
+    expect(merge({ ...ready(8), start: 3 }, { ...loaded(8), commits: loaded(8).commits.slice(5) }, '/repo').start).toBe(-1)
+  })
+
+  test('a window is not kept across another branch’s history', () => {
+    const paged = { ...ready(8), start: 3 }
+
+    expect(merge(paged, { ...loaded(8), viewing: 'feature' }, '/repo')).toMatchObject({ viewing: 'feature', start: -1 })
+  })
+
+  test('hasMore says git may hold older commits: the limit was filled', () => {
+    expect(merge(INITIAL, loaded(60), '/repo')).toMatchObject({ limit: 60, hasMore: true })
+    expect(merge(INITIAL, loaded(59), '/repo').hasMore).toBe(false)
+    expect(merge({ ...ready(3), limit: 120 }, loaded(60), '/repo')).toMatchObject({ limit: 120, hasMore: false })
+  })
+
+  test('the branch viewed, the limit and what a fetch said outlast a refresh, and git failing for a moment', () => {
+    const t = { ...ready(3), viewing: 'feature', limit: 120, fetchedAt: 99, isStale: true, fetch: 'failed' as const, fetchNote: 'no network' }
+    const same = { viewing: 'feature', limit: 120, fetchedAt: 99, isStale: true, fetch: 'failed', fetchNote: 'no network' }
+
+    expect(merge(t, { ...loaded(3), viewing: 'feature' }, '/repo')).toMatchObject(same)
+    expect(merge(t, { ...loaded(3), status: 'error', message: 'locked', commits: [] }, '/repo')).toMatchObject(same)
+    // Another repository starts afresh.
+    expect(merge(t, { ...loaded(3), branches: [] }, '/other')).toMatchObject({ viewing: '', limit: 60, fetchedAt: 0, fetch: 'idle' })
+  })
+
+  test('a fetch the last load left running is not running after a reload; any other state stays', () => {
+    const running = { ...ready(3), fetch: 'running' as const, fetchNote: 'x' }
+
+    expect(settleFetch(running)).toMatchObject({ fetch: 'idle', fetchNote: '' })
+    expect(settleFetch({ ...running, fetch: 'failed' as const })).toMatchObject({ fetch: 'failed', fetchNote: 'x' })
+  })
+
+  test('describeFetch counts the remote branches that moved, appeared or went', () => {
+    const before = [branch('main', 'm1', 1), branch('origin/main', 'a', 1, true), branch('origin/old', 'b', 1, true), branch('origin/x', 'c', 1, true)]
+    const after = [
+      branch('main', 'm2', 2),
+      branch('origin/main', 'a2', 2, true),
+      branch('origin/x', 'c', 1, true),
+      branch('origin/new', 'd', 2, true),
+    ]
+
+    expect(describeFetch(before, after)).toBe('1 updated, 1 new, 1 removed')
+    expect(describeFetch(before, before)).toBe('nothing new')
+    expect(describeFetch([], [])).toBe('nothing new')
   })
 })

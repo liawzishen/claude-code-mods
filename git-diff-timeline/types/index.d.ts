@@ -27,6 +27,10 @@ export type GitDiffStat = {
 export type GitDiffBranch = {
   /** As git spells it short: `main`, `origin/main`. */
   name: string
+  /** The full ref (`refs/heads/main`, `refs/remotes/origin/main`): it starts with `refs/`, so git cannot take it for an option. */
+  ref: string
+  /** The commit the branch points at. */
+  sha: string
   /** Last commit time, seconds since the epoch. */
   time: number
   isRemote: boolean
@@ -78,6 +82,20 @@ export type GitDiffTimeline = {
   anchor: string
   /** Newest first, as git sorts them. */
   branches: GitDiffBranch[]
+  /** The branch whose history the timeline shows, read without checking it out; '' is the checked-out one. */
+  viewing: string
+  /** Commits asked of git for the timeline. It grows when the person scrolls back past the oldest. */
+  limit: number
+  /** True when git may hold commits older than the timeline has. */
+  hasMore: boolean
+  /** When the repository last fetched from a remote, seconds since the epoch; 0 when git does not say. */
+  fetchedAt: number
+  /** True when that was more than a day ago. */
+  isStale: boolean
+  /** `running` while a Fetch the person pressed is under way; `failed` when it ended in an error. */
+  fetch: 'idle' | 'running' | 'failed'
+  /** What the last Fetch changed, or why it failed. */
+  fetchNote: string
   base: string
   compare: string
   branchCompare: GitDiffBranchCompare | null

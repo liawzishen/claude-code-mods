@@ -22,12 +22,17 @@ export type Loaded = {
   branches: GitDiffBranch[]
   /** The branch others are compared with by default: origin's default branch, else a main one. */
   defaultBase: string
+  /** The branch whose history `commits` is; '' is the checked-out one. */
+  viewing: string
 }
 
 /** The revisions of one `git diff`: two, one (against the working tree), or `base...compare`. */
 export type Spec = readonly string[]
 
+/** Commits the timeline loads at first, and that many more each time the person scrolls past the oldest. */
 export const LOG_LIMIT = 60
+/** The most commits the timeline loads. */
+export const MAX_LOG = 600
 export const BRANCH_COMMITS = 30
 /** Characters of hunks one file's diff may hold: a Code element takes at most 10000. */
 export const PATCH_LIMIT = 9000
@@ -45,7 +50,7 @@ const RS = '\u001e'
 const US = '\u001f'
 const GS = '\u001d'
 const LOG_FORMAT = '--format=%x1e%H%x1f%h%x1f%ct%x1f%s%x1f%b%x1d'
-const REF_FORMAT = '--format=%(refname)%1f%(refname:short)%1f%(committerdate:unix)%1f%(symref)'
+const REF_FORMAT = '--format=%(refname)%1f%(refname:short)%1f%(committerdate:unix)%1f%(symref)%1f%(objectname)'
 const NUMSTAT = ['diff', '--numstat', '-z', '--no-renames']
 const PATCH = ['diff', '--no-color', '--no-ext-diff', '--no-renames', '-U3']
 const MAIN_BRANCHES = ['origin/main', 'origin/master', 'main', 'master']
@@ -109,8 +114,10 @@ export const parseBranches = (stdout: string): GitDiffBranch[] =>
     .split(/\r?\n/)
     .map(line => line.split(US))
     .filter(([refname = '', , , symref = '']) => refname !== '' && symref === '')
-    .map(([refname = '', name = '', time = '']) => ({
+    .map(([refname = '', name = '', time = '', , sha = '']) => ({
       name,
+      ref: refname,
+      sha,
       time: Number(time) || 0,
       isRemote: refname.startsWith('refs/remotes/'),
     }))
@@ -209,6 +216,7 @@ const empty = (status: Loaded['status'], message: string, branch = ''): Loaded =
   baseOfOldest: '',
   branches: [],
   defaultBase: '',
+  viewing: '',
 })
 
 const pickDefaultBase = (originHead: string, branches: GitDiffBranch[]) => {
@@ -234,7 +242,11 @@ const baseOf = async (run: Run, oldest: GitDiffCommit) => {
   return format.stdout.trim() === 'sha256' ? EMPTY_TREE.sha256 : EMPTY_TREE.sha1
 }
 
-export const loadTimeline = async (run: Run): Promise<Loaded> => {
+/**
+ * The history of `view` (a branch, local or remote; '' is the checked-out one), newest `limit`
+ * commits of it. Another branch is read as it is, never checked out.
+ */
+export const loadTimeline = async (run: Run, view = '', limit = LOG_LIMIT): Promise<Loaded> => {
   const inside = await run(['git', 'rev-parse', '--is-inside-work-tree'])
 
   if (inside.exitCode !== 0 || inside.stdout.trim() !== 'true') {
@@ -255,15 +267,28 @@ export const loadTimeline = async (run: Run): Promise<Loaded> => {
     return empty('no-commits', `No commits yet on ${branch}`, branch)
   }
 
+  const branches = refs.exitCode === 0 ? parseBranches(refs.stdout) : []
+  // A branch that is gone, or is the checked-out one, is the checked-out one. Its full ref goes
+  // to git, with `--` after it: it can be taken neither for an option nor for a file.
+  const target = view === '' || view === branch ? undefined : branches.find(candidate => candidate.name === view)
+
   // First parent only: a merged pull request is one commit, so each step is one pull request's diff.
-  const log = await run(['git', 'log', '--first-parent', '-n', String(LOG_LIMIT), LOG_FORMAT, '--shortstat'])
+  const log = await run([
+    'git',
+    'log',
+    '--first-parent',
+    '-n',
+    String(limit),
+    LOG_FORMAT,
+    '--shortstat',
+    ...(target === undefined ? [] : [target.ref, '--']),
+  ])
 
   if (log.exitCode !== 0) {
     return empty('error', firstLine(log.stderr) || 'git log failed', branch)
   }
 
   const commits = parseLog(log.stdout)
-  const branches = refs.exitCode === 0 ? parseBranches(refs.stdout) : []
   const oldest = commits[0]
 
   return {
@@ -271,11 +296,45 @@ export const loadTimeline = async (run: Run): Promise<Loaded> => {
     message: '',
     branch,
     commits,
-    hasWorking: dirty.exitCode === 0 && dirty.stdout !== '',
+    // Uncommitted changes are changes to the checked-out branch: no other branch has them.
+    hasWorking: target === undefined && dirty.exitCode === 0 && dirty.stdout !== '',
     untracked: others.exitCode === 0 ? others.stdout.split('\0').filter(path => path !== '').length : 0,
     baseOfOldest: oldest === undefined ? '' : await baseOf(run, oldest),
     branches,
     defaultBase: pickDefaultBase(originHead.exitCode === 0 ? originHead.stdout.trim() : '', branches),
+    viewing: target?.name ?? '',
+  }
+}
+
+/**
+ * Where git keeps the time of the last fetch: FETCH_HEAD, which every fetch rewrites. Git prints
+ * it relative to the folder it ran in; '' when git does not say.
+ */
+export const fetchHeadPath = async (run: Run, cwd: string): Promise<string> => {
+  const result = await run(['git', 'rev-parse', '--git-path', 'FETCH_HEAD'])
+  const path = result.exitCode === 0 ? firstLine(result.stdout) : ''
+
+  return path === '' || /^(?:[A-Za-z]:)?[\\/]/.test(path) ? path : `${cwd.replace(/[\\/]+$/, '')}/${path}`
+}
+
+/** The line that says why a fetch failed: git's own `fatal:` or `error:`, else the last line. */
+const reasonOf = (stderr: string) => {
+  const lines = stderr
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line !== '')
+
+  return (
+    lines.find(line => line.startsWith('fatal:')) ?? lines.find(line => line.startsWith('error:')) ?? lines.at(-1) ?? ''
+  )
+}
+
+/** Brings every remote's branches up to date, and drops the copies of branches the remote deleted. */
+export const fetchAll = async (run: Run): Promise<void> => {
+  const result = await run(['git', 'fetch', '--all', '--prune'])
+
+  if (result.exitCode !== 0) {
+    throw new Error(reasonOf(result.stderr) || 'git fetch failed')
   }
 }
 

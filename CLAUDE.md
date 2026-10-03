@@ -15,6 +15,7 @@ Each top-level folder is one Claude Code mod: a plugin whose hooks module export
 - `$` may only be passed to functions declared at the top level of the file. `claude plugin validate` refuses anything else.
 - JSX compiles against the global `h`. Take elements from `$.ui.resolve(e)`: Box, Text, Button, Select, Code, Markdown, Link; `Svg` on desktop only; `Raster`/`Image` on the terminal only.
 - `$.ui.resolve(e)` hands back every element name on every surface; one the surface lacks draws nothing. Choose elements by `e.surface`, never by `'Svg' in ui`.
+- A `Select` takes 1 to 64 options. More, and the engine refuses the whole tree and draws its own, so the band vanishes: cut a long list (git-diff-timeline spreads 64 waypoints over a long history).
 - A render hook never writes state. Write from a handler (`onPress`, `onSelect`) or another event with `update($, atom, fn)` from `claude-code`.
 - Test files cannot import `node:*`. Mock git with a beneath hook: `on('process.run', (_$, e) => ({ value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false } }))`.
 
@@ -24,6 +25,12 @@ Each top-level folder is one Claude Code mod: a plugin whose hooks module export
 - One accent, Claude's own: the `claude` theme key on `Text`, `#d77757` in an `Svg`. Green and red only for lines added and removed.
 - `Text` colours are theme keys (`claude`, `success`, `error`), not hex, so they follow the person's theme, the colour-blind ones included.
 - An `Svg` card is light, and dark under `@media (prefers-color-scheme: dark)`: light colours as attributes, a class per role that the dark rules restyle (`git-diff-timeline/hooks/card.ts`).
+
+## Git data
+
+- `origin/*` branches are this computer's copy as of the last fetch, not live data. Say when that was.
+- Never touch the network on a timer or a refresh. Only a person's press (the `Fetch` button) may run `git fetch`.
+- Hand git a branch as its full ref (`refs/heads/x`) followed by `--`, so a branch name can be taken neither for an option nor for a file.
 
 ## What the desktop app does (tested 2026-10-03, engine 2.1.286)
 

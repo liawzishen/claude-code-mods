@@ -1,4 +1,5 @@
-import type { GitDiffCommit, GitDiffStat, GitDiffTimeline } from '../types'
+import type { GitDiffBranch, GitDiffCommit, GitDiffStat, GitDiffTimeline } from '../types'
+import { LOG_LIMIT } from './git'
 import type { Loaded } from './git'
 
 export type Range = { from: number; to: number }
@@ -22,6 +23,13 @@ export const INITIAL: GitDiffTimeline = {
   isPinned: false,
   anchor: '',
   branches: [],
+  viewing: '',
+  limit: LOG_LIMIT,
+  hasMore: false,
+  fetchedAt: 0,
+  isStale: false,
+  fetch: 'idle',
+  fetchNote: '',
   base: '',
   compare: '',
   branchCompare: null,
@@ -150,6 +158,43 @@ export const commitTitle = (commit: Pick<GitDiffCommit, 'subject' | 'body'>): st
     : subjectName(commit.subject)
 }
 
+/**
+ * What a fetch changed among the remote branches, in words: how many moved, appeared or were
+ * deleted on the remote.
+ */
+export const describeFetch = (before: readonly GitDiffBranch[], after: readonly GitDiffBranch[]): string => {
+  const was = new Map(before.filter(branch => branch.isRemote).map(branch => [branch.name, branch.sha]))
+  const now = new Map(after.filter(branch => branch.isRemote).map(branch => [branch.name, branch.sha]))
+  const updated = [...now].filter(([name, sha]) => was.has(name) && was.get(name) !== sha).length
+  const added = [...now.keys()].filter(name => !was.has(name)).length
+  const removed = [...was.keys()].filter(name => !now.has(name)).length
+  const parts = [
+    updated > 0 ? `${updated} updated` : '',
+    added > 0 ? `${added} new` : '',
+    removed > 0 ? `${removed} removed` : '',
+  ].filter(part => part !== '')
+
+  return parts.length === 0 ? 'nothing new' : parts.join(', ')
+}
+
+/**
+ * A fetch the last load left running is not running now: the state is the host's and outlives a
+ * reload, and the fetch it names went with the old module.
+ */
+export const settleFetch = (t: GitDiffTimeline): GitDiffTimeline =>
+  t.fetch === 'running' ? { ...t, fetch: 'idle', fetchNote: '' } : t
+
+/**
+ * The leftmost node a window keeps after a refresh: the commit it began with, found again by
+ * its sha, so older commits loaded in front of it do not move the window. -1 follows the newest.
+ */
+const windowStart = (prev: GitDiffTimeline, ids: readonly string[]): number => {
+  const first = prev.start < 0 ? undefined : nodeIds(prev)[prev.start]
+  const at = first === undefined ? -1 : ids.indexOf(first)
+
+  return at < 0 ? -1 : at
+}
+
 /** The branches compared: kept while they exist, else origin's default against the current one. */
 const branchPick = (prev: GitDiffTimeline, loaded: Loaded, isSameRepo: boolean) => {
   const names = new Set(loaded.branches.map(branch => branch.name))
@@ -165,13 +210,21 @@ const branchPick = (prev: GitDiffTimeline, loaded: Loaded, isSameRepo: boolean) 
 /** The next state once git answered; keeps what the person picked while it still exists. */
 export const merge = (prev: GitDiffTimeline, loaded: Loaded, cwd: string): GitDiffTimeline => {
   const isSameRepo = prev.cwd === cwd
+  // What the person chose, and what a fetch said, outlast a refresh, and a git that fails for a moment.
+  const kept = isSameRepo ? prev : INITIAL
   const bare: GitDiffTimeline = {
     ...INITIAL,
     cwd,
     status: loaded.status,
     message: loaded.message,
     branch: loaded.branch,
-    mode: isSameRepo ? prev.mode : 'history',
+    mode: kept.mode,
+    viewing: kept.viewing,
+    limit: kept.limit,
+    fetchedAt: kept.fetchedAt,
+    isStale: kept.isStale,
+    fetch: kept.fetch,
+    fetchNote: kept.fetchNote,
   }
 
   if (loaded.status !== 'ready') {
@@ -185,6 +238,8 @@ export const merge = (prev: GitDiffTimeline, loaded: Loaded, cwd: string): GitDi
     untracked: loaded.untracked,
     baseOfOldest: loaded.baseOfOldest,
     branches: loaded.branches,
+    viewing: loaded.viewing,
+    hasMore: loaded.commits.length >= bare.limit,
     ...branchPick(prev, loaded, isSameRepo),
   }
   const ids = nodeIds(next)
@@ -203,13 +258,13 @@ export const merge = (prev: GitDiffTimeline, loaded: Loaded, cwd: string): GitDi
   }
   const from = isSameRepo && prev.isPinned ? locate(refOf(prev, prev.from)) : null
   const to = isSameRepo && prev.isPinned ? locate(refOf(prev, prev.to)) : null
-  const kept = from !== null && to !== null && to > from ? { from, to } : null
+  const pick = from !== null && to !== null && to > from ? { from, to } : null
   const merged: GitDiffTimeline = {
     ...next,
-    ...(kept ?? defaultRange(ids.length)),
-    isPinned: kept !== null,
+    ...(pick ?? defaultRange(ids.length)),
+    isPinned: pick !== null,
     anchor: isSameRepo && ids.includes(prev.anchor) ? prev.anchor : '',
-    start: isSameRepo ? prev.start : -1,
+    start: isSameRepo && loaded.viewing === prev.viewing ? windowStart(prev, ids) : -1,
     branchCompare: isSameRepo ? prev.branchCompare : null,
   }
 

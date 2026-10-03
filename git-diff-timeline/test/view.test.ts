@@ -5,6 +5,7 @@ import type { CardNode } from '../hooks/card'
 import {
   ARROW_W,
   SLOT_W,
+  centerStart,
   dayLabels,
   formatDate,
   formatTime,
@@ -45,6 +46,15 @@ describe('layout', () => {
     expect(stepStart(0, 1, 5, 12)).toBe(4)
     expect(stepStart(4, 1, 5, 12)).toBe(-1)
     expect(resolveStart(-1, 5, 3)).toBe(0)
+  })
+
+  test('a jump puts the node in the middle of the window, and the newest window follows the newest', () => {
+    expect(centerStart(20, 5, 60)).toBe(18)
+    expect(centerStart(1, 5, 60)).toBe(0)
+    expect(centerStart(59, 5, 60)).toBe(-1)
+    expect(centerStart(57, 5, 60)).toBe(-1)
+    expect(centerStart(56, 5, 60)).toBe(54)
+    expect(centerStart(2, 5, 3)).toBe(-1)
   })
 
   test('a dot reads as its day where the day changes, else as its time, and the working tree as Now', () => {
@@ -134,6 +144,22 @@ describe('the history card', () => {
     const x = /data-span="pick" x="([\d.]+)"/.exec(pick)?.[1]
 
     expect(Number(x)).toBeLessThan(slotCenter(0) * CELL)
+  })
+
+  test('a small scroll bar tells where the window sits, with the compared pair lit on it', () => {
+    const overview = { total: 61, first: 20, last: 29, pickFrom: 22, pickTo: 26, more: true }
+    const bar = historyCard({ columns: 120, nodes, title: 'main', range, stats, older: 20, newer: 31, overview })
+
+    expect(bar).toContain('21–30 of 61+')
+    expect(attr(bar, 'data-scroll')).toEqual(['pick', 'window'])
+    expect(bar).not.toContain('older')
+
+    // Everything in view: nothing to scroll. Too narrow for the bar: the words alone.
+    expect(historyCard({ columns: 120, nodes, title: 'main', range, stats, older: 0, newer: 0, overview: { ...overview, first: 0, last: 60, more: false } })).not.toContain('data-scroll')
+
+    const tight = historyCard({ columns: 70, nodes: nodes.slice(1), title: 'main', range, stats, older: 0, newer: 0, overview })
+
+    expect(tight).not.toContain('data-scroll="window"')
   })
 
   test('escapes text', () => {

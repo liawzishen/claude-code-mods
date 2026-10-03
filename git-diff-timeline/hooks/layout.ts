@@ -75,3 +75,10 @@ export const stepStart = (start: number, delta: number, count: number, total: nu
 
   return next === Math.max(0, total - count) ? -1 : next
 }
+
+/** The leftmost node that puts node `index` in the middle of the window; `-1` once that is the newest window. */
+export const centerStart = (index: number, count: number, total: number): number => {
+  const start = clampStart(index - Math.floor(count / 2), count, total)
+
+  return start === Math.max(0, total - count) ? -1 : start
+}
