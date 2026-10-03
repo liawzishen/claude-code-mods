@@ -1,4 +1,4 @@
-import type { On } from 'claude-code'
+import type { CommandRunInput, On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
 const RS = '\u001e'
@@ -102,6 +102,14 @@ const BAND = {
 
 const PLUGIN = 'git-diff-timeline'
 
+/** `/gitdiff` typed at the prompt, whole as the engine passes it: no arguments, a fullscreen terminal. */
+const GITDIFF: CommandRunInput = {
+  command: 'gitdiff',
+  args: '',
+  origin: { kind: 'composer' },
+  presentation: { isFullscreen: true, columns: 120 },
+}
+
 describe('the strip above the prompt', () => {
   test('desktop: one click shows that commit and its message, a second click compares the two', async ($, on) => {
     let opens = 0
@@ -114,7 +122,7 @@ describe('the strip above the prompt', () => {
         return placed
       },
     })
-    await $.command.run({ command: 'gitdiff' })
+    await $.command.run(GITDIFF)
 
     const band = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: BAND, viewport: { columns: 120, rows: 30 } })
 
@@ -153,7 +161,7 @@ describe('the strip above the prompt', () => {
 
   test('terminal: no picture, the same commit buttons', async ($, on) => {
     world(on, { isDirty: false })
-    await $.command.run({ command: 'gitdiff' })
+    await $.command.run(GITDIFF)
 
     const band = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'AbovePrompt', props: BAND, viewport: { columns: 120, rows: 30 } })
 
@@ -175,7 +183,7 @@ describe('the strip above the prompt', () => {
 
   test('paging shows older commits', async ($, on) => {
     world(on, { isDirty: true })
-    await $.command.run({ command: 'gitdiff' })
+    await $.command.run(GITDIFF)
 
     const narrow = { ...BAND, bodyColumns: 40 }
     const band = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: narrow, viewport: { columns: 40, rows: 30 } })
@@ -192,7 +200,7 @@ describe('the strip above the prompt', () => {
   test('branches: two branches, how far apart they are, and what the compare branch adds', async ($, on) => {
     const { diffs } = world(on, { isDirty: false })
 
-    await $.command.run({ command: 'gitdiff' })
+    await $.command.run(GITDIFF)
 
     const band = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: BAND, viewport: { columns: 120, rows: 30 } })
 
@@ -219,7 +227,7 @@ describe('the strip above the prompt', () => {
     // Beneath the plugin: what the engine itself draws in the band, which is nothing.
     on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Box', props: {}, children: [] }))
 
-    await $.command.run({ command: 'gitdiff' })
+    await $.command.run(GITDIFF)
 
     const band = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: BAND, viewport: { columns: 120, rows: 30 } })
 
@@ -230,7 +238,7 @@ describe('the strip above the prompt', () => {
     world(on, { isDirty: true })
     on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Box', props: {}, children: [] }))
 
-    await $.command.run({ command: 'gitdiff' })
+    await $.command.run(GITDIFF)
 
     const band = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: BAND, viewport: { columns: 120, rows: 30 } })
 
@@ -266,7 +274,7 @@ describe('the strip above the prompt', () => {
 describe('the files view', () => {
   test('a file’s diff opens and closes from its name, and a binary file says so', async ($, on) => {
     world(on, { isDirty: true })
-    await $.command.run({ command: 'gitdiff' })
+    await $.command.run(GITDIFF)
 
     const pane = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', requestId: 'git-diff', props: PANE, viewport: { columns: 84, rows: 30 } })
 
@@ -292,7 +300,7 @@ describe('the files view', () => {
     on('ui.open', () => placed)
     on('process.run', () => answer('', 128, 'fatal: not a git repository\n'))
 
-    await $.command.run({ command: 'gitdiff' })
+    await $.command.run(GITDIFF)
 
     const pane = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', requestId: 'git-diff', props: PANE, viewport: { columns: 84, rows: 30 } })
 
@@ -303,7 +311,7 @@ describe('the files view', () => {
   test('with the side-pane setting, the pane carries the timeline too', { options: { position: 'pane' } }, async ($, on) => {
     world(on, { isDirty: false })
 
-    const ran = await $.command.run({ command: 'gitdiff' })
+    const ran = await $.command.run(GITDIFF)
 
     expect(ran.text).toBe('Git Diff pane opened.')
 
@@ -354,7 +362,7 @@ describe('the files view', () => {
     })
     on('prompt.submit', (_$, e) => ({ text: e.text }))
 
-    const ran = await $.command.run({ command: 'gitdiff' })
+    const ran = await $.command.run(GITDIFF)
 
     expect(ran.text).toBe('Git Diff pane is waiting: too narrow')
     expect(opens).toEqual([false])
