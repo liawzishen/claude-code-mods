@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { CELL, branchCard, historyCard } from '../hooks/card'
+import { CELL, HEIGHT, branchCard, historyCard } from '../hooks/card'
 import type { CardNode } from '../hooks/card'
 import {
   ARROW_W,
@@ -70,21 +70,16 @@ describe('layout', () => {
 
 describe('the history card', () => {
   const nodes = [node('Jul 2', 'outside'), node('Jul 3', 'base'), node('Jul 4', 'compare', 300)]
-  const svg = historyCard({
-    columns: 95,
-    nodes,
-    title: 'main · 3 commits',
-    stats: { files: '4 files changed', added: '+172', deleted: '−35' },
-    older: 2,
-    newer: 0,
-  })
+  const stats = { files: '4 files changed', added: '+172', deleted: '−35' }
+  const range = { from: 'a3e3a24', to: 'b5d4801' }
+  const svg = historyCard({ columns: 95, nodes, title: 'main · 3 commits', range, stats, older: 2, newer: 0 })
 
   test('is one svg as wide as the band, a dot per commit at its slot centre', () => {
     const centres = [...svg.matchAll(/data-node="(\d+)" cx="([\d.]+)"/g)].map(m => [Number(m[1]), Number(m[2])])
 
     expect(svg.startsWith('<svg')).toBe(true)
     expect(svg.endsWith('</svg>')).toBe(true)
-    expect(attr(svg, 'viewBox')[0]).toBe(`0 0 ${95 * CELL} 170`)
+    expect(attr(svg, 'viewBox')[0]).toBe(`0 0 ${95 * CELL} ${HEIGHT}`)
     expect(centres).toEqual(nodes.map((_, i) => [i, slotCenter(i) * CELL]))
   })
 
@@ -96,8 +91,53 @@ describe('the history card', () => {
     expect(svg).not.toContain('newer')
   })
 
+  test('the pill names both ends and the totals, and keeps the totals when the card is narrow', () => {
+    expect(svg).toContain('>a3e3a24</tspan>')
+    expect(svg).toContain('>b5d4801</tspan>')
+
+    const narrow = historyCard({ columns: 30, nodes: nodes.slice(1), title: 'main · 3 commits', range, stats, older: 0, newer: 0 })
+
+    expect(narrow).toContain('+172')
+    expect(narrow).toContain('−35')
+    expect(narrow).not.toContain('4 files changed')
+  })
+
+  test('is light, and dark where the app is', () => {
+    expect(svg).toContain('@media (prefers-color-scheme: dark)')
+    expect(svg).toMatch(/class="f-ink" fill="#[0-9a-f]{6}"/)
+  })
+
+  test('lights the bars of the commits the pick takes in, and draws none for a commit with no lines', () => {
+    const bars = historyCard({
+      columns: 95,
+      nodes: [node('Jul 1', 'outside', 0), ...nodes],
+      title: 'main',
+      range,
+      stats,
+      older: 0,
+      newer: 0,
+    })
+
+    expect(attr(bars, 'data-bar')).toEqual(['out', 'out', 'in'])
+  })
+
+  test('a pick that starts out of view runs from the track’s start', () => {
+    const pick = historyCard({
+      columns: 95,
+      nodes: [node('Jul 3', 'between'), node('Jul 4', 'compare')],
+      title: 'main',
+      range,
+      stats,
+      older: 4,
+      newer: 0,
+    })
+    const x = /data-span="pick" x="([\d.]+)"/.exec(pick)?.[1]
+
+    expect(Number(x)).toBeLessThan(slotCenter(0) * CELL)
+  })
+
   test('escapes text', () => {
-    const odd = historyCard({ columns: 60, nodes, title: 'a<b & c', stats: null, older: 0, newer: 0 })
+    const odd = historyCard({ columns: 60, nodes, title: 'a<b & c', range, stats: null, older: 0, newer: 0 })
 
     expect(odd).toContain('a&lt;b &amp; c')
     expect(odd).toContain('reading the diff')

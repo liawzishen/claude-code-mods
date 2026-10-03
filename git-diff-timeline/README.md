@@ -2,11 +2,11 @@
 
 A Claude Code mod that puts a Git Diff timeline above the prompt.
 
-- **History:** a card of the branch's commits (first parent, so a merged pull request is one commit). Click a commit to see its changes; click a second commit to compare the two. The commit messages being compared show under the timeline, with merges named by their pull or merge request title.
+- **History:** a range slider over the branch's commits (first parent, so a merged pull request is one commit), with a bar for each commit's size. Click a commit to see its changes; click a second commit to compare the two. A pill on top sums up the pick; the commit messages being compared show under the timeline, with merges named by their pull or merge request title.
 - **Branches:** compare two branches the way a pull request would (`base...compare`): commits ahead and behind, where they split, and what the compare branch adds.
 - **Files changed:** a side panel listing the compared commits and each changed file, with its diff.
 
-It reads local git only, so it works with GitHub, GitLab or any other remote.
+It reads local git only, so it works with GitHub, GitLab or any other remote. On the desktop the card is light, and dark when the app is; on the terminal the slider is drawn in text.
 
 ## Install
 

@@ -1,36 +1,99 @@
 import { slotCenter } from './layout'
 
 /**
- * The cards the desktop draws as one Svg each: a deep navy card, the compared span
- * aglow in orange-red. Units are tenths of a cell, so a dot drawn at a slot's centre
- * sits over the commit button in that slot below the card.
+ * The cards the desktop draws as one Svg each. Minimal, with a few physical cues lit from
+ * above: a raised card, the commits on a recessed track, the compared span a lit bar in
+ * that track with a raised knob at each end, and a summary pill on top. The colours are
+ * the app's own; the card is light, and dark where the app is (a media query inside the
+ * Svg). Units are tenths of a cell, so a knob drawn at a slot's centre sits over the
+ * commit button in that slot below the card.
  */
 
 /** viewBox units per cell: a card is `columns * CELL` wide. */
 export const CELL = 10
 
-const H = 170
-const BY = 116
-const WAVE = 50
+/** viewBox units down: both cards are this tall. */
+export const HEIGHT = 156
+
+const PILL_Y = 28
+const PILL_H = 32
+const PILL_SIZE = 16
+const PILL_PAD = 16
+const SIDE_SIZE = 14
+const LABEL_SIZE = 15
+/** Track ends, from the card's sides. */
+const EDGE = 20
+const TRACK_Y = 106
+const TRACK_H = 12
+const SPAN_H = 8
+const KNOB_R = 10
+const BAR_BASE = 92
+const BAR_MAX = 30
+const BAR_W = 8
+const LABEL_Y = 138
+const RAIL_Y = 70
+const BASE_Y = 110
 const MAX_DOTS = 12
 
-const CARD = '#0f1729'
-const INK = '#eef1f7'
-const INK2 = '#a3adc2'
-const MUTED = '#8a94ab'
-const LINE = '#2a3550'
-const DOT = '#56627f'
-const IN_RANGE = '#c9d1e3'
-const ADDED = '#5fd38d'
-const DELETED = '#ff7b8a'
-const A1 = '#ffa25c'
-const A2 = '#ff4d2e'
-const FONT = 'Segoe UI, system-ui, -apple-system, sans-serif'
+const SANS = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
+
+/** The colour of each role on a light card: what the attributes paint. */
+const LIGHT = {
+  surface: '#ffffff',
+  surfaceLow: '#faf9f6',
+  pill: '#ffffff',
+  edge: '#e4e2db',
+  ink: '#1f1e1d',
+  soft: '#5e5d59',
+  muted: '#6b6a64',
+  groove: '#ebe9e3',
+  grooveTop: '#d3cfc6',
+  dot: '#7f7c73',
+  bar: '#d9d5cb',
+  knob: '#ffffff',
+  knobLow: '#ecebe5',
+  stop: '#ffffff',
+  barLit: '#ebb4a1',
+  accent: '#d77757',
+  accentHigh: '#e99a7e',
+  added: '#2c7a39',
+  deleted: '#ab2b3f',
+} as const
+
+type Tone = keyof typeof LIGHT
+
+/** The same roles on a dark card: what the media query paints. */
+const DARK: Record<Tone, string> = {
+  surface: '#363532',
+  surfaceLow: '#2d2c29',
+  pill: '#42413d',
+  edge: '#4d4b47',
+  ink: '#f4f3ee',
+  soft: '#c4c2b9',
+  muted: '#a3a199',
+  groove: '#211f1d',
+  grooveTop: '#141312',
+  dot: '#8f8c83',
+  bar: '#4d4b46',
+  knob: '#f4f3ee',
+  knobLow: '#d3d0c7',
+  stop: '#fbefe9',
+  barLit: '#b9654a',
+  accent: '#d77757',
+  accentHigh: '#e7917a',
+  added: '#4eba65',
+  deleted: '#ff6b80',
+}
+
+const DARK_RULES = (Object.keys(DARK) as Tone[])
+  .map(tone => `.f-${tone}{fill:${DARK[tone]}}.s-${tone}{stroke:${DARK[tone]}}.c-${tone}{stop-color:${DARK[tone]}}`)
+  .join('')
 
 export type CardNode = {
-  /** Under the dot: `Jul 4`, `Now`. */
+  /** Under the knob or dot: `Jul 4`, `Now`. */
   label: string
-  /** Lines changed: the wave's height over the dot. */
+  /** Lines changed: the height of its bar over the track. */
   churn: number
   role: 'outside' | 'base' | 'between' | 'compare'
   isWorking: boolean
@@ -46,6 +109,8 @@ export type HistoryCardInput = {
   /** The commits in view, oldest first, one per slot. */
   nodes: CardNode[]
   title: string
+  /** The two ends compared, as the pill names them: a short sha, `#123`, `Now`. */
+  range: { from: string; to: string }
   stats: CardStats
   /** Commits beyond the view on each side. */
   older: number
@@ -66,107 +131,181 @@ export type BranchCardInput = {
   stats: CardStats
 }
 
+/** A run of the pill's text: its words, its colour, and the gap before it. */
+type Span = { text: string; tone: Tone; gap?: number; isMono?: boolean; isBold?: boolean }
+
 const r = (n: number) => Math.round(n * 10) / 10
 
 const esc = (text: string) =>
   text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 
-/** A smooth curve through the points (Catmull-Rom as cubic Béziers). */
-const smooth = (points: ReadonlyArray<readonly [number, number]>) => {
-  const [x0 = 0, y0 = 0] = points[0] ?? []
-  let d = `M${r(x0)},${r(y0)}`
+/** Paints with a tone: the light colour as the attribute, a class the dark rules restyle. */
+const fillOf = (tone: Tone) => ` class="f-${tone}" fill="${LIGHT[tone]}"`
 
-  for (let i = 0; i < points.length - 1; i += 1) {
-    const a = points[i - 1] ?? points[i]!
-    const b = points[i]!
-    const c = points[i + 1]!
-    const e = points[i + 2] ?? c
+const strokeOf = (tone: Tone) => ` class="s-${tone}" stroke="${LIGHT[tone]}"`
 
-    d += ` C${r(b[0] + (c[0] - a[0]) / 7)},${r(b[1] + (c[1] - a[1]) / 7)} ${r(c[0] - (e[0] - b[0]) / 7)},${r(c[1] - (e[1] - b[1]) / 7)} ${r(c[0])},${r(c[1])}`
+const fillAndStroke = (fill: Tone, stroke: Tone) =>
+  ` class="f-${fill} s-${stroke}" fill="${LIGHT[fill]}" stroke="${LIGHT[stroke]}"`
+
+const stopOf = (offset: number, tone: Tone) => `<stop offset="${offset}" class="c-${tone}" stop-color="${LIGHT[tone]}"/>`
+
+/** About how wide `text` draws at `size` units: on the wide side, so a pill around it fits. */
+const widthOf = (text: string, size: number, isMono = false) =>
+  [...text].reduce((sum, ch) => {
+    if (isMono) {
+      return sum + size * 0.62
+    }
+
+    const em = ch === ' ' ? 0.3 : /[.,:;·'|il]/.test(ch) ? 0.32 : /[→…—]/.test(ch) ? 1 : /[A-Z0-9+−%#@mw]/.test(ch) ? 0.66 : 0.55
+
+    return sum + size * em
+  }, 0)
+
+const spansWidth = (spans: readonly Span[], size: number) =>
+  spans.reduce((sum, span) => sum + (span.gap ?? 0) + widthOf(span.text, size, span.isMono) * (span.isBold ? 1.1 : 1), 0)
+
+const tspan = (span: Span) =>
+  `<tspan${span.gap ? ` dx="${span.gap}"` : ''}${span.isMono ? ` font-family="${MONO}"` : ''}${span.isBold ? ' font-weight="600"' : ''}${fillOf(span.tone)}>${esc(span.text)}</tspan>`
+
+/** Groups of spans, a dot between each two. */
+const joined = (...groups: Span[][]): Span[] =>
+  groups
+    .filter(group => group.length > 0)
+    .flatMap((group, i) =>
+      i === 0 ? group : [{ text: '·', tone: 'muted', gap: 9 }, { ...group[0]!, gap: 9 }, ...group.slice(1)],
+    )
+
+/** The totals: `4 files changed +172 −35`, or that they are on their way. */
+const statSpans = (stats: CardStats, withFiles: boolean): Span[] =>
+  stats === null
+    ? [{ text: 'reading the diff…', tone: 'muted' }]
+    : [
+        ...(withFiles ? [{ text: stats.files, tone: 'soft' as const }] : []),
+        { text: stats.added, tone: 'added', gap: withFiles ? 10 : 0 },
+        { text: stats.deleted, tone: 'deleted', gap: 7 },
+      ]
+
+/** The summary in a raised capsule at the card's top centre: the first choice that fits `room`. */
+const pillOf = (center: number, room: number, choices: Span[][]) => {
+  const spans = choices.find(choice => spansWidth(choice, PILL_SIZE) + 2 * PILL_PAD <= room) ?? choices.at(-1) ?? []
+  const width = spansWidth(spans, PILL_SIZE) + 2 * PILL_PAD
+
+  return {
+    width,
+    svg:
+      `<rect x="${r(center - width / 2)}" y="${PILL_Y - PILL_H / 2}" width="${r(width)}" height="${PILL_H}" rx="${PILL_H / 2}"${fillAndStroke('pill', 'edge')} stroke-width="1" filter="url(#shadow-pill)"/>` +
+      `<text x="${r(center)}" y="${PILL_Y + 5.5}" font-size="${PILL_SIZE}" text-anchor="middle">${spans.map(tspan).join('')}</text>`,
   }
-
-  return d
 }
 
-const open = (width: number, label: string, glowX1: number, glowX2: number) =>
+const open = (width: number, label: string) =>
   [
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${H}" width="${width * 4}" height="${H * 4}" font-family="${FONT}" role="img" aria-label="${esc(label)}">`,
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${HEIGHT}" width="${width * 4}" height="${HEIGHT * 4}" font-family="${SANS}" role="img" aria-label="${esc(label)}">`,
+    `<style>@media (prefers-color-scheme: dark){${DARK_RULES}}</style>`,
     '<defs>',
-    '<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#151f37"/><stop offset="1" stop-color="#0b1220"/></linearGradient>',
-    `<linearGradient id="accent" gradientUnits="userSpaceOnUse" x1="${r(glowX1)}" y1="0" x2="${r(Math.max(glowX2, glowX1 + 1))}" y2="0"><stop offset="0" stop-color="${A1}"/><stop offset="1" stop-color="${A2}"/></linearGradient>`,
-    `<linearGradient id="fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${A2}" stop-opacity="0.5"/><stop offset="1" stop-color="${A2}" stop-opacity="0"/></linearGradient>`,
-    `<radialGradient id="halo"><stop offset="0" stop-color="${A2}" stop-opacity="0.22"/><stop offset="1" stop-color="${A2}" stop-opacity="0"/></radialGradient>`,
-    '<filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>',
+    `<linearGradient id="card" x1="0" y1="0" x2="0" y2="1">${stopOf(0, 'surface')}${stopOf(1, 'surfaceLow')}</linearGradient>`,
+    `<linearGradient id="groove" x1="0" y1="0" x2="0" y2="1">${stopOf(0, 'grooveTop')}${stopOf(0.55, 'groove')}</linearGradient>`,
+    `<linearGradient id="span" x1="0" y1="0" x2="0" y2="1">${stopOf(0, 'accentHigh')}${stopOf(1, 'accent')}</linearGradient>`,
+    `<linearGradient id="knob" x1="0" y1="0" x2="0" y2="1">${stopOf(0, 'knob')}${stopOf(1, 'knobLow')}</linearGradient>`,
+    '<filter id="shadow-card" x="-5%" y="-10%" width="110%" height="130%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.08"/></filter>',
+    '<filter id="shadow-pill" x="-10%" y="-40%" width="120%" height="200%"><feDropShadow dx="0" dy="1" stdDeviation="1.2" flood-color="#000" flood-opacity="0.1"/></filter>',
+    '<filter id="shadow-knob" x="-60%" y="-60%" width="220%" height="220%"><feDropShadow dx="0" dy="1.5" stdDeviation="1.5" flood-color="#000" flood-opacity="0.3"/></filter>',
     '</defs>',
-    `<rect width="${width}" height="${H}" rx="22" fill="url(#bg)"/>`,
+    `<rect x="4" y="3" width="${width - 8}" height="${HEIGHT - 10}" rx="18" fill="url(#card)" filter="url(#shadow-card)"/>`,
+    // The card's top edge catches the light; only the dark card shows it.
+    `<path d="M22,3.6 H${width - 22}" stroke="#ffffff" stroke-opacity="0.08" stroke-width="1"/>`,
   ].join('')
 
-/** The header's right side: the totals, or that they are on their way. */
-const statsText = (x: number, stats: CardStats) =>
-  stats === null
-    ? `<text x="${r(x)}" y="30" font-size="15" fill="${MUTED}" text-anchor="end">reading the diff…</text>`
-    : `<text x="${r(x)}" y="30" font-size="15" text-anchor="end"><tspan fill="${INK}">${esc(stats.files)}</tspan><tspan dx="14" fill="${ADDED}">${esc(stats.added)}</tspan><tspan dx="10" fill="${DELETED}">${esc(stats.deleted)}</tspan></text>`
+/** A recessed track from `x1` to `x2`, centred on `y`: its upper wall in shadow. */
+const groove = (x1: number, x2: number, y: number) =>
+  `<rect x="${r(x1)}" y="${y - TRACK_H / 2}" width="${r(x2 - x1)}" height="${TRACK_H}" rx="${TRACK_H / 2}" fill="url(#groove)"/>`
 
-const glowDot = (x: number, y: number, extra = '') =>
-  `<circle cx="${r(x)}" cy="${y}" r="17" fill="${A2}" opacity="0.35" filter="url(#glow)"/><circle${extra} cx="${r(x)}" cy="${y}" r="8" fill="${A2}" stroke="${CARD}" stroke-width="3"/>`
+/** A raised knob: the light from above, its shadow below, a ring in the accent. */
+const knob = (attrs: string, ring: Tone, radius = KNOB_R, isDashed = false) =>
+  `<g filter="url(#shadow-knob)"><circle${attrs} r="${radius}" fill="url(#knob)"${strokeOf(ring)} stroke-width="${radius > 8 ? 3 : 2}"${isDashed ? ' stroke-dasharray="4 3"' : ''}/></g>`
 
 const nodeMark = (node: CardNode, i: number, x: number) => {
-  const at = ` data-node="${i}" cx="${r(x)}" cy="${BY}"`
+  const at = ` data-node="${i}" cx="${r(x)}" cy="${TRACK_Y}"`
   const role = ` data-role="${node.role}"`
-  const dashed = node.isWorking ? ' stroke-dasharray="3 3"' : ''
 
   switch (node.role) {
-    case 'compare':
-      return `<circle cx="${r(x)}" cy="${BY}" r="17" fill="${A2}" opacity="0.35" filter="url(#glow)"/><circle${at} r="8"${role} fill="${A2}" stroke="${CARD}" stroke-width="3"/>`
     case 'base':
-      return `<circle${at} r="7"${role} fill="${CARD}" stroke="${A1}" stroke-width="3"${dashed}/>`
+    case 'compare':
+      return knob(`${at}${role}`, 'accent', KNOB_R, node.isWorking)
     case 'between':
-      return `<circle${at} r="4.5"${role} fill="${IN_RANGE}"/>`
+      return `<circle${at} r="3"${role}${fillOf('stop')}/>`
     default:
       return node.isWorking
-        ? `<circle${at} r="5"${role} fill="${CARD}" stroke="${IN_RANGE}" stroke-width="2"${dashed}/>`
-        : `<circle${at} r="4.5"${role} fill="${DOT}"/>`
+        ? `<circle${at} r="4.5"${role}${fillAndStroke('groove', 'dot')} stroke-width="1.6" stroke-dasharray="2.5 2"/>`
+        : `<circle${at} r="3.5"${role}${fillOf('dot')}/>`
   }
 }
 
-/** History: the commits in view on a line, the wave of their size above it, the pick aglow. */
-export const historyCard = ({ columns, nodes, title, stats, older, newer }: HistoryCardInput): string => {
+/** Text at a top corner of the card, beside the pill, when it fits there. */
+const corner = (text: string, x: number, room: number, anchor: 'start' | 'end') =>
+  text === '' || widthOf(text, SIDE_SIZE) > room
+    ? ''
+    : `<text x="${r(x)}" y="${PILL_Y + 5}" font-size="${SIDE_SIZE}" text-anchor="${anchor}"${fillOf('muted')}>${esc(text)}</text>`
+
+/**
+ * History: a range slider over the commits in view, with a bar of each commit's size above
+ * it. The pick is the lit span between two knobs; the commits whose changes it takes in
+ * have their bars lit too.
+ */
+export const historyCard = ({ columns, nodes, title, range, stats, older, newer }: HistoryCardInput): string => {
   const width = columns * CELL
+  const left = EDGE
+  const right = width - EDGE
   const xs = nodes.map((_, i) => slotCenter(i) * CELL)
-  const tallest = Math.log10(1 + Math.max(1, ...nodes.map(node => node.churn)))
-  const ys = nodes.map(node => BY - 6 - (WAVE * Math.log10(1 + node.churn)) / tallest)
-  const left = 16
-  const right = width - 16
-  const wave = smooth([[left, BY], ...xs.map((x, i) => [x, ys[i]!] as const), [right, BY]])
-  const area = `${wave} L${right},${BY} L${left},${BY} Z`
   const picked = nodes.map((node, i) => (node.role === 'outside' ? -1 : i)).filter(i => i >= 0)
   const firstPicked = picked[0]
-  const lastPicked = picked[picked.length - 1]
-  const hasSpan = firstPicked !== undefined && lastPicked !== undefined
-  // A pick that runs out of view glows to the card's edge on that side.
-  const spanFrom = !hasSpan ? 0 : nodes[firstPicked]!.role === 'between' ? left : xs[firstPicked]!
-  const spanTo = !hasSpan ? 0 : nodes[lastPicked]!.role === 'between' ? right : xs[lastPicked]!
+  const lastPicked = picked.at(-1)
+  // A pick whose end is out of view runs on to the track's end on that side.
+  const spanFrom = firstPicked === undefined ? 0 : nodes[firstPicked]!.role === 'base' ? xs[firstPicked]! : left
+  const spanTo = lastPicked === undefined ? 0 : nodes[lastPicked]!.role === 'compare' ? xs[lastPicked]! : right
+  const rangeSpans: Span[] = [
+    { text: range.from, tone: 'ink', isMono: true },
+    { text: '→', tone: 'muted', gap: 7 },
+    { text: range.to, tone: 'ink', isMono: true, gap: 7 },
+  ]
+  const pill = pillOf(
+    width / 2,
+    width - 48,
+    stats === null
+      ? [joined(rangeSpans, statSpans(null, true)), rangeSpans]
+      : [joined(rangeSpans, statSpans(stats, true)), joined(rangeSpans, statSpans(stats, false)), statSpans(stats, false)],
+  )
+  const sideRoom = width / 2 - pill.width / 2 - 40
+  const beyond = [older > 0 ? `${older} older` : '', newer > 0 ? `${newer} newer` : ''].filter(Boolean).join(' · ')
+  const tallest = Math.log10(1 + Math.max(1, ...nodes.map(node => node.churn)))
   const parts = [
-    open(width, title, spanFrom, spanTo),
-    hasSpan ? `<ellipse cx="${r((spanFrom + spanTo) / 2)}" cy="${BY - 30}" rx="${r(Math.max(120, (spanTo - spanFrom) / 2 + 80))}" ry="90" fill="url(#halo)"/>` : '',
-    `<text x="24" y="30" font-size="15" fill="${INK2}">${esc(title)}</text>`,
-    statsText(width - 24, stats),
-    `<path d="${area}" fill="#18233c"/>`,
-    `<path d="${wave}" fill="none" stroke="#2f3d5c" stroke-width="2"/>`,
+    open(width, `${title}: ${range.from} to ${range.to}`),
+    pill.svg,
+    corner(title, 24, sideRoom, 'start'),
+    corner(beyond, width - 24, sideRoom, 'end'),
   ]
 
-  if (hasSpan && spanTo > spanFrom) {
+  nodes.forEach((node, i) => {
+    if (node.churn <= 0) {
+      return
+    }
+
+    const height = 3 + ((BAR_MAX - 3) * Math.log10(1 + node.churn)) / tallest
+    const isIn = node.role === 'between' || node.role === 'compare'
+
     parts.push(
-      `<clipPath id="span"><rect x="${r(spanFrom)}" y="0" width="${r(spanTo - spanFrom)}" height="${H}"/></clipPath>`,
-      `<g clip-path="url(#span)"><path d="${area}" fill="url(#fill)"/><path d="${wave}" fill="none" stroke="url(#accent)" stroke-width="3" filter="url(#glow)"/></g>`,
+      `<rect data-bar="${isIn ? 'in' : 'out'}" x="${r(xs[i]! - BAR_W / 2)}" y="${r(BAR_BASE - height)}" width="${BAR_W}" height="${r(height)}" rx="${BAR_W / 2}"${fillOf(isIn ? 'barLit' : 'bar')}/>`,
     )
-  }
+  })
 
-  parts.push(`<line x1="${left}" y1="${BY}" x2="${right}" y2="${BY}" stroke="${LINE}" stroke-width="3" stroke-linecap="round"/>`)
+  parts.push(groove(left, right, TRACK_Y))
 
-  if (hasSpan && spanTo > spanFrom) {
+  if (spanTo > spanFrom) {
+    const x1 = Math.max(left + 2, spanFrom - SPAN_H / 2)
+    const x2 = Math.min(right - 2, spanTo + SPAN_H / 2)
+
     parts.push(
-      `<line x1="${r(spanFrom)}" y1="${BY}" x2="${r(spanTo)}" y2="${BY}" stroke="url(#accent)" stroke-width="5" stroke-linecap="round" filter="url(#glow)"/>`,
+      `<rect data-span="pick" x="${r(x1)}" y="${TRACK_Y - SPAN_H / 2}" width="${r(x2 - x1)}" height="${SPAN_H}" rx="${SPAN_H / 2}" fill="url(#span)"/>`,
     )
   }
 
@@ -176,17 +315,9 @@ export const historyCard = ({ columns, nodes, title, stats, older, newer }: Hist
 
     parts.push(
       `<g><title>${esc(node.tip)}</title>${nodeMark(node, i, x)}</g>`,
-      `<text x="${r(x)}" y="146" font-size="13" fill="${isPicked ? INK : MUTED}" text-anchor="middle">${esc(node.label)}</text>`,
+      `<text x="${r(x)}" y="${LABEL_Y}" font-size="${LABEL_SIZE}" text-anchor="middle"${fillOf(isPicked ? 'ink' : 'muted')}${isPicked ? ' font-weight="600"' : ''}>${esc(node.label)}</text>`,
     )
   })
-
-  if (older > 0) {
-    parts.push(`<text x="20" y="164" font-size="12" fill="${MUTED}">‹ ${older} older</text>`)
-  }
-
-  if (newer > 0) {
-    parts.push(`<text x="${width - 20}" y="164" font-size="12" fill="${MUTED}" text-anchor="end">${newer} newer ›</text>`)
-  }
 
   parts.push('</svg>')
 
@@ -197,64 +328,86 @@ export const historyCard = ({ columns, nodes, title, stats, older, newer }: Hist
 const spread = (count: number, x1: number, x2: number) =>
   Array.from({ length: count }, (_, i) => (count === 1 ? x2 : x1 + ((x2 - x1) * i) / (count - 1)))
 
-/** Branches: the base line, the compare branch forking off it, each side's commits as dots. */
+/**
+ * Branches: the base on a recessed track, the compare branch forking off it on a lit rail.
+ * The knobs mark what the diff runs between: where they split, and the compare tip.
+ */
 export const branchCard = (input: BranchCardInput): string => {
   const { columns, base, compare, ahead, behind, aheadTips, behindTips, mergeBase, stats } = input
   const width = columns * CELL
   const fork = Math.round(width * 0.22)
-  const top = 68
-  const tipX = width - 40
+  const tipX = width - 44
+  const middle = (fork + 90 + tipX) / 2
   const aheadCount = Math.min(ahead, MAX_DOTS)
   const behindCount = Math.min(behind, MAX_DOTS)
   const aheadXs = spread(aheadCount, fork + 90, tipX)
   const behindXs = spread(behindCount, fork + 90, tipX)
-  const label = `${compare} is ${ahead} ahead of and ${behind} behind ${base}`
+  const words: Span[] = [
+    { text: `${ahead} ahead`, tone: 'ink', isBold: true },
+    { text: '·', tone: 'muted', gap: 7 },
+    { text: `${behind} behind`, tone: 'ink', isBold: true, gap: 7 },
+  ]
+  const pill = pillOf(width / 2, width - 48, [
+    joined(words, statSpans(stats, true)),
+    joined(words, statSpans(stats, false)),
+    words,
+  ])
   const parts = [
-    open(width, label, fork, tipX),
-    `<ellipse cx="${r((fork + tipX) / 2)}" cy="${top}" rx="${r((tipX - fork) / 2 + 60)}" ry="70" fill="url(#halo)"/>`,
-    `<text x="24" y="30" font-size="15"><tspan fill="${INK}">${ahead} ahead</tspan><tspan dx="8" fill="${MUTED}">·</tspan><tspan dx="8" fill="${INK}">${behind} behind</tspan></text>`,
-    statsText(width - 24, stats),
-    `<line x1="16" y1="${BY}" x2="${width - 16}" y2="${BY}" stroke="${LINE}" stroke-width="3" stroke-linecap="round"/>`,
-    ...[0.25, 0.5, 0.75].map(at => `<circle cx="${r(fork * at)}" cy="${BY}" r="4.5" fill="${DOT}"/>`),
+    open(width, `${compare} is ${ahead} ahead of and ${behind} behind ${base}`),
+    pill.svg,
+    groove(EDGE, width - EDGE, BASE_Y),
+    ...[0.25, 0.5, 0.75].map(at => `<circle cx="${r(fork * at)}" cy="${BASE_Y}" r="3.5"${fillOf('dot')}/>`),
   ]
 
   behindXs.forEach((x, i) => {
     const tip = behindTips[behindTips.length - behindCount + i] ?? ''
-    const isTip = i === behindCount - 1
+    const at = ` data-side="behind" cx="${r(x)}" cy="${BASE_Y}"`
 
     parts.push(
-      `<g><title>${esc(tip)}</title><circle data-side="behind" cx="${r(x)}" cy="${BY}" r="${isTip ? 6 : 4.5}" fill="${isTip ? IN_RANGE : DOT}"/></g>`,
+      `<g><title>${esc(tip)}</title>${i === behindCount - 1 ? knob(at, 'dot', 7) : `<circle${at} r="3.5"${fillOf('dot')}/>`}</g>`,
     )
   })
 
   if (ahead > 0) {
+    const rail = `M${fork},${BASE_Y} C${fork + 40},${BASE_Y} ${fork + 36},${RAIL_Y} ${fork + 76},${RAIL_Y} L${tipX},${RAIL_Y}`
+
     parts.push(
-      `<path d="M${fork},${BY} C${fork + 40},${BY} ${fork + 36},${top} ${fork + 76},${top} L${tipX},${top}" fill="none" stroke="url(#accent)" stroke-width="3" stroke-linecap="round" filter="url(#glow)"/>`,
+      `<path d="${rail}" fill="none"${strokeOf('groove')} stroke-width="${TRACK_H}" stroke-linecap="round"/>`,
+      `<path d="${rail}" fill="none"${strokeOf('accent')} stroke-width="${SPAN_H}" stroke-linecap="round"/>`,
     )
   }
 
   aheadXs.forEach((x, i) => {
     const tip = aheadTips[aheadTips.length - aheadCount + i] ?? ''
-    const isTip = i === aheadCount - 1
+    const at = ` data-side="ahead" cx="${r(x)}" cy="${RAIL_Y}"`
 
     parts.push(
-      `<g><title>${esc(tip)}</title>${isTip ? glowDot(x, top, ' data-side="ahead"') : `<circle data-side="ahead" cx="${r(x)}" cy="${top}" r="4" fill="#ffc6a6"/>`}</g>`,
+      `<g><title>${esc(tip)}</title>${i === aheadCount - 1 ? knob(at, 'accent') : `<circle${at} r="3"${fillOf('stop')}/>`}</g>`,
     )
   })
 
   if (ahead > aheadCount) {
-    parts.push(`<text x="${fork + 90}" y="${top - 16}" font-size="12" fill="${MUTED}">+${ahead - aheadCount} more</text>`)
+    parts.push(
+      `<text x="${r(middle)}" y="${RAIL_Y + 24}" font-size="${SIDE_SIZE}" text-anchor="middle"${fillOf('muted')}>+${ahead - aheadCount} more</text>`,
+    )
   }
 
   if (behind > behindCount) {
-    parts.push(`<text x="${fork + 90}" y="${BY + 22}" font-size="12" fill="${MUTED}">+${behind - behindCount} more</text>`)
+    parts.push(
+      `<text x="${r(middle)}" y="${LABEL_Y}" font-size="${SIDE_SIZE}" text-anchor="middle"${fillOf('muted')}>+${behind - behindCount} more</text>`,
+    )
   }
 
+  // With nothing ahead there is no rail: the compare branch is the fork, so its name sits there.
+  const compareAt = ahead > 0 ? `x="${tipX + KNOB_R}" y="${RAIL_Y - 18}" text-anchor="end"` : `x="${fork}" y="${BASE_Y - 20}" text-anchor="middle"`
+
   parts.push(
-    `<circle cx="${fork}" cy="${BY}" r="7" fill="${CARD}" stroke="${IN_RANGE}" stroke-width="2.5"/>`,
-    `<text x="${tipX}" y="${top - 18}" font-size="14" fill="${INK2}" text-anchor="end">${esc(compare)}</text>`,
-    `<text x="${tipX}" y="${BY + 26}" font-size="14" fill="${INK2}" text-anchor="end">${esc(base)}</text>`,
-    mergeBase === '' ? '' : `<text x="${fork}" y="${BY + 26}" font-size="12" fill="${MUTED}" text-anchor="middle">${esc(mergeBase)}</text>`,
+    knob(` cx="${fork}" cy="${BASE_Y}"`, 'accent'),
+    `<text ${compareAt} font-size="${LABEL_SIZE}" font-weight="600"${fillOf('ink')}>${esc(compare)}</text>`,
+    `<text x="${tipX + KNOB_R}" y="${LABEL_Y}" font-size="${LABEL_SIZE}" font-weight="600" text-anchor="end"${fillOf('soft')}>${esc(base)}</text>`,
+    mergeBase === ''
+      ? ''
+      : `<text x="${fork}" y="${LABEL_Y}" font-size="${SIDE_SIZE}" text-anchor="middle"${fillOf('muted')}>${esc(mergeBase)}</text>`,
     '</svg>',
   )
 

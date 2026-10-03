@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { ElementTable, EngineInterface, Register, RenderElement, Timer } from 'claude-code'
+import type { ElementTable, EngineInterface, Register, RenderElement, RenderSurface, Timer } from 'claude-code'
 
 import type { GitDiffCommit, GitDiffFile, GitDiffPatch, GitDiffStat, GitDiffTimeline } from '../types'
 import { branchCard, historyCard } from './card'
@@ -52,11 +52,14 @@ const MAX_OPEN = 4
 /** Commits the files view lists above the files. */
 const MAX_COMMITS = 20
 const BLOCKS = 5
+/** Cells of track either side of a commit's knob on the terminal. */
+const HALF_SLOT = (SLOT_W - 1) / 2
 
-const GRAY = '#9aa3b2'
-const GREEN = '#2f9e5b'
-const RED = '#d9534f'
-const ACCENT = '#ff4d2e'
+/** Theme keys: each surface paints them in the person's theme, the colour-blind ones too. */
+const ACCENT = 'claude'
+const ADDED = 'success'
+const DELETED = 'error'
+const ERROR = 'error'
 
 const timeline = atom({ plugin: 'git-diff-timeline', key: 'timeline' } as const, INITIAL)
 
@@ -67,13 +70,17 @@ const errorText = (error: unknown) => (error instanceof Error ? error.message : 
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
-const kitOf = (ui: ElementTable): Kit => ({
+/**
+ * The elements a surface draws. By the surface, not by the table's keys: a table is
+ * completed to every element name, one the surface lacks drawing nothing.
+ */
+const kitOf = (ui: ElementTable, surface: RenderSurface): Kit => ({
   Box: ui.Box,
   Text: ui.Text,
   Button: ui.Button,
   Code: ui.Code,
-  Select: 'Select' in ui ? ui.Select : null,
-  Svg: 'Svg' in ui ? ui.Svg : null,
+  Select: surface !== 'mobile' && 'Select' in ui ? ui.Select : null,
+  Svg: surface !== 'terminal' && 'Svg' in ui ? ui.Svg : null,
 })
 
 const runnerFor = async ($: EngineInterface): Promise<Run> => {
@@ -255,12 +262,14 @@ const actionsFor = ($: EngineInterface): Actions => ({
   toggleFile: path => void toggleFile($, path),
 })
 
+const isEmptyTree = (sha: string) => sha === EMPTY_TREE.sha1 || sha === EMPTY_TREE.sha256
+
 /** A node in words: its pull request or message, `Uncommitted changes`, or what came before. */
 const nodeName = (t: GitDiffTimeline, index: number) => {
   if (index < 0) {
     const oldest = t.commits[0]
 
-    return t.baseOfOldest === EMPTY_TREE.sha1 || t.baseOfOldest === EMPTY_TREE.sha256 || oldest === undefined
+    return isEmptyTree(t.baseOfOldest) || oldest === undefined
       ? 'nothing (before the first commit)'
       : `before ${commitTitle(oldest)}`
   }
@@ -268,6 +277,17 @@ const nodeName = (t: GitDiffTimeline, index: number) => {
   const commit = t.commits[index]
 
   return commit === undefined ? 'Uncommitted changes' : commitTitle(commit)
+}
+
+/** A node as its button reads, for the card's summary: `#123`, a short sha, `Now`, `empty tree`. */
+const nodeTag = (t: GitDiffTimeline, index: number) => {
+  if (index < 0) {
+    return isEmptyTree(t.baseOfOldest) ? 'empty tree' : t.baseOfOldest.slice(0, 7)
+  }
+
+  const commit = t.commits[index]
+
+  return commit === undefined ? 'Now' : buttonLabel(commit)
 }
 
 const when = (seconds: number) => `${shortDate(seconds)}, ${formatTime(seconds)}`
@@ -302,6 +322,12 @@ const branchOptions = (t: GitDiffTimeline) =>
     label: branch.name === t.branch ? `${branch.name} (current)` : branch.name,
   }))
 
+/**
+ * A view tab: the open one a plain button, the other quiet. Not `primary`: that marks the
+ * commit being looked at, the one thing on the strip that should stand out.
+ */
+const tabLook = (isOpen: boolean) => (isOpen ? { variant: 'secondary' as const } : { plain: true as const, dimColor: true })
+
 /** The strip's first row: History or Branches, how to pick, the files view and a refresh. */
 const controls = ({ Box, Text, Button, Select }: Kit, t: GitDiffTimeline, on: Actions): RenderElement => {
   const isHistory = t.mode === 'history'
@@ -333,18 +359,8 @@ const controls = ({ Box, Text, Button, Select }: Kit, t: GitDiffTimeline, on: Ac
   return (
     <Box flexDirection="row" flexWrap="wrap" columnGap={1} alignItems="center" justifyContent="space-between">
       <Box flexDirection="row" columnGap={1} alignItems="center" flexWrap="wrap">
-        <Button
-          key="mode:history"
-          label="History"
-          {...(isHistory ? { variant: 'primary' as const } : {})}
-          onPress={() => on.mode('history')}
-        />
-        <Button
-          key="mode:branches"
-          label="Branches"
-          {...(isHistory ? {} : { variant: 'primary' as const })}
-          onPress={() => on.mode('branches')}
-        />
+        <Button key="mode:history" label="History" {...tabLook(isHistory)} onPress={() => on.mode('history')} />
+        <Button key="mode:branches" label="Branches" {...tabLook(!isHistory)} onPress={() => on.mode('branches')} />
         {pickers}
       </Box>
       <Box flexDirection="row" columnGap={1}>
@@ -361,21 +377,51 @@ const totals = ({ Box, Text }: Kit, t: GitDiffTimeline): RenderElement => {
 
   return (
     <Box flexDirection="row" columnGap={1}>
-      {t.statError !== '' && <Text color={RED}>{t.statError}</Text>}
+      {t.statError !== '' && <Text color={ERROR}>{t.statError}</Text>}
       {t.statError === '' && stat === null && <Text dimColor>Reading the diff…</Text>}
       {stat !== null && <Text>{stat.files}</Text>}
-      {stat !== null && <Text color={GREEN}>{stat.added}</Text>}
-      {stat !== null && <Text color={RED}>{stat.deleted}</Text>}
+      {stat !== null && <Text color={ADDED}>{stat.added}</Text>}
+      {stat !== null && <Text color={DELETED}>{stat.deleted}</Text>}
     </Box>
   )
 }
 
-const dotColor = (role: CardNode['role']) =>
-  role === 'base' || role === 'compare' ? { color: ACCENT } : role === 'between' ? {} : { color: GRAY }
+/** Half a slot of track: heavy in the accent inside the compared span, a thin rule outside it. */
+const rail = ({ Text }: Kit, isIn: boolean): RenderElement =>
+  isIn ? <Text color={ACCENT}>{'━'.repeat(HALF_SLOT)}</Text> : <Text dimColor>{'─'.repeat(HALF_SLOT)}</Text>
 
-/** History: the card (a line of dots in text on the terminal), and under it a button per commit. */
+/** The terminal's slider: a knob at each end of the pick, the span between them drawn heavy. */
+const trackRow = (kit: Kit, t: GitDiffTimeline, indexes: number[]): RenderElement => {
+  const { Box, Text } = kit
+  const newest = nodeIds(t).length - 1
+  // Whether the stretch of track from node `a` to the next one is inside the pick.
+  const isIn = (a: number) => t.from <= a && a + 1 <= t.to
+
+  return (
+    <Box flexDirection="row">
+      <Box width={ARROW_W} />
+      {indexes.map(i => {
+        const role = roleOf(t, i)
+        const isPicked = role === 'base' || role === 'compare'
+        const glyph = t.commits[i] === undefined ? '○' : isPicked ? '◉' : '●'
+
+        return (
+          <Box width={SLOT_W} flexDirection="row">
+            {rail(kit, isIn(i - 1))}
+            <Text {...(role === 'outside' ? { dimColor: true } : { color: ACCENT })} bold={isPicked}>
+              {glyph}
+            </Text>
+            {i < newest ? rail(kit, isIn(i)) : <Text>{' '.repeat(HALF_SLOT)}</Text>}
+          </Box>
+        )
+      })}
+    </Box>
+  )
+}
+
+/** History: the card (a slider in text on the terminal), and under it a button per commit. */
 const historyStrip = (kit: Kit, t: GitDiffTimeline, columns: number, on: Actions): RenderElement => {
-  const { Box, Text, Button, Svg } = kit
+  const { Box, Button, Svg } = kit
   const { total, count, start, indexes } = windowOf(t, columns)
   const labels = dayLabels(indexes.map(i => t.commits[i]?.time ?? null))
   const nodes: CardNode[] = indexes.map((i, k) => {
@@ -396,16 +442,7 @@ const historyStrip = (kit: Kit, t: GitDiffTimeline, columns: number, on: Actions
     Svg === null ? (
       <Box flexDirection="column">
         {totals(kit, t)}
-        <Box flexDirection="row">
-          <Box width={ARROW_W} />
-          {nodes.map(node => (
-            <Box width={SLOT_W} justifyContent="center">
-              <Text {...dotColor(node.role)} bold={node.role === 'compare'}>
-                {node.isWorking ? '○' : node.role === 'compare' ? '◉' : '●'}
-              </Text>
-            </Box>
-          ))}
-        </Box>
+        {trackRow(kit, t, indexes)}
       </Box>
     ) : (
       <Svg
@@ -413,6 +450,7 @@ const historyStrip = (kit: Kit, t: GitDiffTimeline, columns: number, on: Actions
           columns,
           nodes,
           title,
+          range: { from: nodeTag(t, t.from), to: nodeTag(t, t.to) },
           stats: describeStat(t.stat),
           older: start,
           newer: total - start - indexes.length,
@@ -453,22 +491,24 @@ const historyStrip = (kit: Kit, t: GitDiffTimeline, columns: number, on: Actions
           <Button key="next" plain dimColor={start + count >= total} label="›" onPress={() => on.step(1, count)} />
         </Box>
       </Box>
-      {messageRow(kit, t, t.from, '○')}
-      {messageRow(kit, t, t.to, '●')}
+      {messageRow(kit, t, t.from, 'From')}
+      {messageRow(kit, t, t.to, 'To')}
     </Box>
   )
 }
 
-/** One end of the comparison: its mark, short sha, message and when. */
-const messageRow = ({ Box, Text }: Kit, t: GitDiffTimeline, index: number, mark: string): RenderElement => {
+/** One end of the comparison: From or To, its short sha and message, and when, at the right. */
+const messageRow = ({ Box, Text }: Kit, t: GitDiffTimeline, index: number, end: string): RenderElement => {
   const commit = t.commits[index]
   const short = index < 0 ? t.baseOfOldest.slice(0, 7) : (commit?.short ?? '')
 
   return (
     <Box flexDirection="row" columnGap={1}>
-      <Text color={ACCENT}>{mark}</Text>
+      <Box width={4} flexShrink={0}>
+        <Text dimColor>{end}</Text>
+      </Box>
       {short !== '' && <Text dimColor>{short}</Text>}
-      <Box flexShrink={1}>
+      <Box flexGrow={1} flexShrink={1}>
         <Text wrap="truncate-end">{nodeName(t, index)}</Text>
       </Box>
       {commit !== undefined && <Text dimColor>{when(commit.time)}</Text>}
@@ -551,7 +591,7 @@ const patchView = ({ Box, Text, Code }: Kit, path: string, patch: GitDiffPatch |
   }
 
   if (patch.note !== '') {
-    return <Text color={RED}>{patch.note}</Text>
+    return <Text color={ERROR}>{patch.note}</Text>
   }
 
   return (
@@ -568,21 +608,26 @@ const fileRow = (kit: Kit, t: GitDiffTimeline, file: GitDiffFile, on: Actions): 
   const share = blocks(file)
   const rest = BLOCKS - share.added - share.deleted
 
+  // The numbers and squares sit in one column at the right edge, so the rows scan as a table.
   return (
     <Box flexDirection="column">
-      <Box flexDirection="row" columnGap={1}>
-        <Button
-          key={`file:${file.path}`}
-          plain
-          label={`${isOpen ? '▾' : '▸'} ${file.path}`}
-          onPress={() => on.toggleFile(file.path)}
-        />
-        <Text color={GREEN}>{file.added === null ? 'binary' : `+${file.added}`}</Text>
-        {file.deleted !== null && <Text color={RED}>{`−${file.deleted}`}</Text>}
-        <Box flexDirection="row">
-          {share.added > 0 && <Text color={GREEN}>{'■'.repeat(share.added)}</Text>}
-          {share.deleted > 0 && <Text color={RED}>{'■'.repeat(share.deleted)}</Text>}
-          {rest > 0 && <Text dimColor>{'■'.repeat(rest)}</Text>}
+      <Box flexDirection="row" columnGap={2} justifyContent="space-between">
+        <Box flexShrink={1}>
+          <Button
+            key={`file:${file.path}`}
+            plain
+            label={`${isOpen ? '▾' : '▸'} ${file.path}`}
+            onPress={() => on.toggleFile(file.path)}
+          />
+        </Box>
+        <Box flexDirection="row" columnGap={1} flexShrink={0}>
+          {file.added === null ? <Text dimColor>binary</Text> : <Text color={ADDED}>{`+${file.added}`}</Text>}
+          {file.deleted !== null && <Text color={DELETED}>{`−${file.deleted}`}</Text>}
+          <Box flexDirection="row">
+            {share.added > 0 && <Text color={ADDED}>{'■'.repeat(share.added)}</Text>}
+            {share.deleted > 0 && <Text color={DELETED}>{'■'.repeat(share.deleted)}</Text>}
+            {rest > 0 && <Text dimColor>{'■'.repeat(rest)}</Text>}
+          </Box>
         </Box>
       </Box>
       {isOpen && patchView(kit, file.path, t.patches.find(patch => patch.path === file.path))}
@@ -597,7 +642,7 @@ const notice = ({ Text }: Kit, t: GitDiffTimeline): RenderElement => {
     case 'no-repo':
       return <Text dimColor>{`Not a git repository: ${t.cwd}`}</Text>
     case 'error':
-      return <Text color={RED}>{`git failed: ${t.message}`}</Text>
+      return <Text color={ERROR}>{`git failed: ${t.message}`}</Text>
     default:
       return <Text dimColor>{t.message}</Text>
   }
@@ -829,19 +874,19 @@ export const register: Register = (on, options) => {
       return next(e)
     }
 
-    const kit = kitOf($.ui.resolve(e))
+    const kit = kitOf($.ui.resolve(e), e.surface)
     const { Text } = kit
 
     return t.status === 'ready' ? (
       strip(kit, t, e.props.bodyColumns, actionsFor($))
     ) : (
-      <Text color={RED}>{`Git Diff: git failed: ${t.message}`}</Text>
+      <Text color={ERROR}>{`Git Diff: git failed: ${t.message}`}</Text>
     )
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const t = await read($, timeline)
 
-    return paneView(kitOf($.ui.resolve(e)), t, e.props.bodyColumns, actionsFor($))
+    return paneView(kitOf($.ui.resolve(e), e.surface), t, e.props.bodyColumns, actionsFor($))
   })
 }

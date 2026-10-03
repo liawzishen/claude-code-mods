@@ -1,5 +1,5 @@
 {
   "name": "session-status",
-  "version": "0.1.0",
-  "description": "Status line showing session time, prompts, and tool calls."
+  "version": "0.2.0",
+  "description": "Status line: how full the context window is, the rate limit nearest to running out (or the cost), and the session's time, prompts and tool calls."
 }

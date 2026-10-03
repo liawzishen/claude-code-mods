@@ -6,7 +6,7 @@ export type GitDiffCommit = {
   subject: string
   /** The message after the subject, trimmed and cut short: a merge's pull request title lives here. */
   body: string
-  /** Lines changed against the first parent: the height of the card's wave. */
+  /** Lines changed against the first parent: the height of its bar on the card. */
   added: number
   deleted: number
 }

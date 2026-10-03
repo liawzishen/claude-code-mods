@@ -122,6 +122,12 @@ describe('the strip above the prompt', () => {
     expect(await band.find({ type: 'Select' })).toBeUndefined()
     expect(await band.find({ key: 'node:0' })).toBeDefined()
     expect(await band.find({ key: 'node:6' })).toMatchObject({ props: { label: 'Now' } })
+    // The open view is a plain tab, the other a quiet one: `primary` is the picked commit's alone.
+    expect(await band.find({ key: 'mode:history' })).toMatchObject({ props: { variant: 'secondary' } })
+    expect(await band.find({ key: 'mode:branches' })).toMatchObject({ props: { dimColor: true } })
+    expect(await band.find({ key: 'node:6' })).toMatchObject({ props: { variant: 'primary' } })
+    expect(await band.find({ type: 'Text', text: 'From' })).toBeDefined()
+    expect(await band.find({ type: 'Text', text: 'To' })).toBeDefined()
 
     const before = opens
 
@@ -157,6 +163,10 @@ describe('the strip above the prompt', () => {
     expect(await band.find({ key: 'node:6' })).toBeUndefined()
 
     await band.press({ key: 'node:3' })
+
+    // A slider in text: a knob at each end of the pick, the track between them drawn heavy.
+    expect(await band.findAll({ type: 'Text', text: '◉' })).toHaveLength(2)
+    expect(await band.find({ type: 'Text', text: '━━━━' })).toBeDefined()
 
     const pane = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'Pane', requestId: 'git-diff', props: PANE, viewport: { columns: 84, rows: 30 } })
 
