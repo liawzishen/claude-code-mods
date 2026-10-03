@@ -6,7 +6,7 @@ export type GitDiffCommit = {
   subject: string
   /** The message after the subject, trimmed and cut short: a merge's pull request title lives here. */
   body: string
-  /** Lines changed against the first parent: the height of its bar on the card. */
+  /** Lines changed against the first parent. */
   added: number
   deleted: number
 }
@@ -74,22 +74,22 @@ export type GitDiffTimeline = {
   /** The compared range, as node indexes: `from` is older than `to`; -1 is `baseOfOldest`. */
   from: number
   to: number
-  /** Index of the leftmost commit button; -1 follows the newest. */
+  /** Index of the leftmost commit on the track; -1 follows the newest. It moves to show the pick. */
   start: number
   /** True once the person picked a range, so a refresh keeps it. */
   isPinned: boolean
-  /** The commit clicked first, waiting for a second click to compare with; '' when none waits. */
-  anchor: string
   /** Newest first, as git sorts them. */
   branches: GitDiffBranch[]
   /** The branch whose history the timeline shows, read without checking it out; '' is the checked-out one. */
   viewing: string
-  /** Commits asked of git for the timeline. It grows when the person scrolls back past the oldest. */
+  /** Commits asked of git for the timeline. It grows when the person steps back past the oldest. */
   limit: number
   /** True when git may hold commits older than the timeline has. */
   hasMore: boolean
   /** When the repository last fetched from a remote, seconds since the epoch; 0 when git does not say. */
   fetchedAt: number
+  /** When `fetchedAt` was read, seconds since the epoch: the strip says how long ago the fetch was as of then. */
+  checkedAt: number
   /** True when that was more than a day ago. */
   isStale: boolean
   /** `running` while a Fetch the person pressed is under way; `failed` when it ended in an error. */

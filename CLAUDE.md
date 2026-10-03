@@ -15,13 +15,17 @@ Each top-level folder is one Claude Code mod: a plugin whose hooks module export
 - `$` may only be passed to functions declared at the top level of the file. `claude plugin validate` refuses anything else.
 - JSX compiles against the global `h`. Take elements from `$.ui.resolve(e)`: Box, Text, Button, Select, Code, Markdown, Link; `Svg` on desktop only; `Raster`/`Image` on the terminal only.
 - `$.ui.resolve(e)` hands back every element name on every surface; one the surface lacks draws nothing. Choose elements by `e.surface`, never by `'Svg' in ui`.
-- A `Select` takes 1 to 64 options. More, and the engine refuses the whole tree and draws its own, so the band vanishes: cut a long list (git-diff-timeline spreads 64 waypoints over a long history).
+- A `Select` takes 1 to 64 options. More, and the engine refuses the whole tree and draws its own, so the band vanishes: cut a long list (git-diff-timeline lists the 64 commits around the pick).
 - A render hook never writes state. Write from a handler (`onPress`, `onSelect`) or another event with `update($, atom, fn)` from `claude-code`.
+- A render hook reads state and draws, nothing more: no `$.clock` or other engine call. One that throws is skipped and the band goes blank (a test without `mock.clock` has no `clock.now`). Work out times when the data is read, and keep them in state.
 - Test files cannot import `node:*`. Mock git with a beneath hook: `on('process.run', (_$, e) => ({ value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false } }))`.
 
 ## The look
 
 - Minimal first. Physical cues only where they help a control read as one: a recessed track, raised knobs, one light from above. No glows.
+- Say each thing once. The card shows the comparison; the row under it picks it (Older, From, To, Newer). Nothing in an `Svg` is a control.
+- Fit the band in a few rows: a header, the card, one row of controls. Show a control only where it applies (`Fetch` only while a remote branch is in view).
+- A desktop draws every `Button` as its native button, `plain` too (the engine's own docs): a row of ten reads as a toolbar. One `Select` beats a row of buttons.
 - One accent, Claude's own: the `claude` theme key on `Text`, `#d77757` in an `Svg`. Green and red only for lines added and removed.
 - `Text` colours are theme keys (`claude`, `success`, `error`), not hex, so they follow the person's theme, the colour-blind ones included.
 - An `Svg` card is light, and dark under `@media (prefers-color-scheme: dark)`: light colours as attributes, a class per role that the dark rules restyle (`git-diff-timeline/hooks/card.ts`).

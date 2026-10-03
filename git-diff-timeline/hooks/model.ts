@@ -21,12 +21,12 @@ export const INITIAL: GitDiffTimeline = {
   to: 0,
   start: -1,
   isPinned: false,
-  anchor: '',
   branches: [],
   viewing: '',
   limit: LOG_LIMIT,
   hasMore: false,
   fetchedAt: 0,
+  checkedAt: 0,
   isStale: false,
   fetch: 'idle',
   fetchNote: '',
@@ -72,21 +72,22 @@ export const selectionKey = (t: Picked): string =>
 export const commitRange = (index: number): Range => ({ from: index - 1, to: index })
 
 /**
- * A click on node `index`, as a date-range picker takes it: the first shows that commit
- * on its own and waits; a second on another node compares the two; the next starts over.
+ * A new newer end, picked from the To list: a single commit stays a single commit, the one
+ * picked; a range keeps its older end while that is still older.
  */
-export const clickCommit = (t: Nodes & Pick<GitDiffTimeline, 'anchor'>, index: number): Range & { anchor: string } => {
-  const ids = nodeIds(t)
-  const waiting = t.anchor === '' ? -1 : ids.indexOf(t.anchor)
+export const withTo = ({ from, to }: Range, index: number): Range =>
+  from === to - 1 || from >= index ? commitRange(index) : { from, to: index }
 
-  if (waiting < 0) {
-    return { ...commitRange(index), anchor: ids[index] ?? '' }
-  }
+/** A new older end, picked from the From list: it must stay older than the newer end. */
+export const withFrom = ({ from, to }: Range, index: number): Range =>
+  index >= -1 && index < to ? { from: index, to } : { from, to }
 
-  return waiting === index
-    ? { ...commitRange(index), anchor: '' }
-    : { from: Math.min(waiting, index), to: Math.max(waiting, index), anchor: '' }
-}
+/**
+ * The pick moved one node older (`delta` -1) or newer (1), both ends at once: a single commit
+ * becomes the one before or after it. Null when that runs off the history loaded.
+ */
+export const shifted = ({ from, to }: Range, delta: number, total: number): Range | null =>
+  from + delta < -1 || to + delta > total - 1 ? null : { from: from + delta, to: to + delta }
 
 /** The commits a history comparison takes in, newest first; the working tree is none of them. */
 export const rangeCommits = (t: Nodes & Range): GitDiffCommit[] =>
@@ -222,6 +223,7 @@ export const merge = (prev: GitDiffTimeline, loaded: Loaded, cwd: string): GitDi
     viewing: kept.viewing,
     limit: kept.limit,
     fetchedAt: kept.fetchedAt,
+    checkedAt: kept.checkedAt,
     isStale: kept.isStale,
     fetch: kept.fetch,
     fetchNote: kept.fetchNote,
@@ -263,7 +265,6 @@ export const merge = (prev: GitDiffTimeline, loaded: Loaded, cwd: string): GitDi
     ...next,
     ...(pick ?? defaultRange(ids.length)),
     isPinned: pick !== null,
-    anchor: isSameRepo && ids.includes(prev.anchor) ? prev.anchor : '',
     start: isSameRepo && loaded.viewing === prev.viewing ? windowStart(prev, ids) : -1,
     branchCompare: isSameRepo ? prev.branchCompare : null,
   }

@@ -6,12 +6,11 @@ import { branchCard, historyCard } from './card'
 import type { CardNode } from './card'
 import { EMPTY_TREE, LOG_LIMIT, MAX_LOG, fetchAll, fetchHeadPath, loadBranchCompare, loadPatch, loadStat, loadTimeline } from './git'
 import type { Loaded, Run } from './git'
-import { ARROW_W, SLOT_W, centerStart, dayLabels, formatTime, resolveStart, shortDate, stepStart, visibleCount } from './layout'
+import { ARROW_W, SLOT_W, formatTime, resolveStart, revealStart, shortDate, trackLabels, visibleCount } from './layout'
 import {
   INITIAL,
   WORKING,
   buttonLabel,
-  clickCommit,
   commitTitle,
   describeFetch,
   describeStat,
@@ -22,7 +21,11 @@ import {
   refOf,
   selectionKey,
   settleFetch,
+  shifted,
+  withFrom,
+  withTo,
 } from './model'
+import type { Range } from './model'
 
 type Kit = Pick<ElementTable<'terminal'>, 'Box' | 'Text' | 'Button' | 'Code'> & {
   /** Absent on the phone. */
@@ -35,14 +38,15 @@ type Actions = {
   refresh: () => void
   details: () => void
   mode: (mode: GitDiffTimeline['mode']) => void
-  pickCommit: (index: number) => void
+  /** Pick the newer or the older end of the comparison by its node's id, the track `count` nodes wide. */
+  pickTo: (id: string, count: number) => void
+  pickFrom: (id: string, count: number) => void
+  /** Move the comparison one commit older (-1) or newer (1). */
+  shift: (delta: number, count: number) => void
   pickBranch: (side: 'base' | 'compare', name: string) => void
   swap: () => void
-  step: (delta: number, count: number) => void
   /** Show another branch's history; '' is the checked-out one. */
   viewBranch: (name: string) => void
-  /** Scroll the timeline to node `index`, in a window of `count` nodes. */
-  goTo: (index: number, count: number) => void
   fetch: () => void
   toggleFile: (path: string) => void
 }
@@ -201,20 +205,22 @@ const loadSelection = async ($: EngineInterface, force: boolean) => {
 const loadFreshness = async ($: EngineInterface, run: Run, cwd: string) => {
   const t = await read($, timeline)
   let fetchedAt = 0
-  let isStale = false
+  let checkedAt = 0
 
   try {
     const path = t.branches.some(branch => branch.isRemote) ? await fetchHeadPath(run, cwd) : ''
 
     if (path !== '') {
       fetchedAt = Math.floor((await $.fs.stat(path)).mtimeMs / 1000)
-      isStale = Math.floor((await $.clock.now()) / 1000) - fetchedAt > STALE_AFTER_S
+      checkedAt = Math.floor((await $.clock.now()) / 1000)
     }
   } catch {
     // No FETCH_HEAD yet (never fetched since the clone), or git did not say: the age is unknown.
   }
 
-  await update($, timeline, cur => ({ ...cur, fetchedAt, isStale }))
+  const isStale = checkedAt > 0 && checkedAt - fetchedAt > STALE_AFTER_S
+
+  await update($, timeline, cur => ({ ...cur, fetchedAt, checkedAt, isStale }))
 }
 
 const refresh = async ($: EngineInterface) => {
@@ -268,8 +274,45 @@ const show = async ($: EngineInterface, change: (t: GitDiffTimeline) => GitDiffT
   await loadSelection($, false)
 }
 
-const pickCommit = ($: EngineInterface, index: number) =>
-  show($, t => ({ ...t, ...clickCommit(t, index), isPinned: true }))
+/** The node a list's value names: a commit's sha or WORKING, or the commit before the oldest (-1); null when gone. */
+const indexOfRef = (t: GitDiffTimeline, id: string): number | null => {
+  if (id !== '' && id === t.baseOfOldest) {
+    return -1
+  }
+
+  const index = nodeIds(t).indexOf(id)
+
+  return index < 0 ? null : index
+}
+
+/** Moves the pick and shows it, the track scrolled to show it too; a pick that cannot be made changes nothing. */
+const repick = async ($: EngineInterface, count: number, pick: (t: GitDiffTimeline) => Range | null) => {
+  if (pick(await read($, timeline)) === null) {
+    return
+  }
+
+  await show($, t => {
+    const next = pick(t)
+
+    return next === null
+      ? t
+      : { ...t, ...next, isPinned: true, start: revealStart(t.start, next.from, next.to, count, nodeIds(t).length) }
+  })
+}
+
+const pickTo = ($: EngineInterface, id: string, count: number) =>
+  repick($, count, t => {
+    const index = indexOfRef(t, id)
+
+    return index === null || index < 0 ? null : withTo(t, index)
+  })
+
+const pickFrom = ($: EngineInterface, id: string, count: number) =>
+  repick($, count, t => {
+    const index = indexOfRef(t, id)
+
+    return index === null ? null : withFrom(t, index)
+  })
 
 const pickBranch = ($: EngineInterface, side: 'base' | 'compare', name: string) =>
   show($, t => (side === 'base' ? { ...t, base: name } : { ...t, compare: name }))
@@ -292,8 +335,8 @@ const canLoadOlder = (t: GitDiffTimeline) => t.hasMore && t.limit < MAX_LOG
 
 let isLoadingOlder = false
 
-/** Reads another page of older commits, and pages the window back onto them. */
-const loadOlder = async ($: EngineInterface, count: number) => {
+/** Reads another page of older commits. The pick is pinned first, so it is found again among them. */
+const loadOlder = async ($: EngineInterface) => {
   if (isLoadingOlder) {
     return
   }
@@ -301,30 +344,22 @@ const loadOlder = async ($: EngineInterface, count: number) => {
   isLoadingOlder = true
 
   try {
-    // The window is pinned to its commits first, so the commits that come in before them move nothing.
-    await update($, timeline, t => ({
-      ...t,
-      limit: Math.min(MAX_LOG, t.limit + LOG_LIMIT),
-      start: resolveStart(t.start, count, nodeIds(t).length),
-    }))
+    await update($, timeline, t => ({ ...t, limit: Math.min(MAX_LOG, t.limit + LOG_LIMIT), isPinned: true }))
     await refresh($)
-    await update($, timeline, t => ({ ...t, start: stepStart(t.start, -1, count, nodeIds(t).length) }))
   } finally {
     isLoadingOlder = false
   }
 }
 
-/** One page left or right. Left of the oldest commit loaded, it reads older ones. */
-const step = async ($: EngineInterface, delta: number, count: number) => {
+/** One commit older or newer. Past the oldest commit loaded, it reads older ones first. */
+const shift = async ($: EngineInterface, delta: number, count: number) => {
   const t = await read($, timeline)
 
-  if (delta < 0 && canLoadOlder(t) && resolveStart(t.start, count, nodeIds(t).length) === 0) {
-    await loadOlder($, count)
-
-    return
+  if (delta < 0 && t.from <= -1 && canLoadOlder(t)) {
+    await loadOlder($)
   }
 
-  await update($, timeline, cur => ({ ...cur, start: stepStart(cur.start, delta, count, nodeIds(cur).length) }))
+  await repick($, count, cur => shifted(cur, delta, nodeIds(cur).length))
 }
 
 /** Shows another branch's history. It reads the branch as it is: nothing is checked out. */
@@ -335,7 +370,6 @@ const viewBranch = async ($: EngineInterface, name: string) => {
     limit: LOG_LIMIT,
     start: -1,
     isPinned: false,
-    anchor: '',
     stat: null,
     statKey: '',
     statError: '',
@@ -344,9 +378,6 @@ const viewBranch = async ($: EngineInterface, name: string) => {
   }))
   await refresh($)
 }
-
-const goTo = (index: number, count: number, $: EngineInterface) =>
-  index < 0 ? Promise.resolve() : update($, timeline, t => ({ ...t, start: centerStart(index, count, nodeIds(t).length) }))
 
 /**
  * Brings the remote branches up to date. Only a person's press starts it: a fetch reaches the
@@ -380,12 +411,12 @@ const actionsFor = ($: EngineInterface): Actions => ({
   refresh: () => void refresh($).catch(() => undefined),
   details: () => void openDetails($),
   mode: mode => void show($, t => ({ ...t, mode })),
-  pickCommit: index => void pickCommit($, index),
+  pickTo: (id, count) => void pickTo($, id, count),
+  pickFrom: (id, count) => void pickFrom($, id, count),
+  shift: (delta, count) => void shift($, delta, count).catch(() => undefined),
   pickBranch: (side, name) => void pickBranch($, side, name),
   swap: () => void show($, t => ({ ...t, base: t.compare, compare: t.base })),
-  step: (delta, count) => void step($, delta, count).catch(() => undefined),
   viewBranch: name => void viewBranch($, name).catch(() => undefined),
-  goTo: (index, count) => void goTo(index, count, $),
   fetch: () => void fetchRemotes($),
   toggleFile: path => void toggleFile($, path),
 })
@@ -407,7 +438,7 @@ const nodeName = (t: GitDiffTimeline, index: number) => {
   return commit === undefined ? 'Uncommitted changes' : commitTitle(commit)
 }
 
-/** A node as its button reads, for the card's summary: `#123`, a short sha, `Now`, `empty tree`. */
+/** A node as the card's pill names it: `#123`, a short sha, `Now`, `empty tree`. */
 const nodeTag = (t: GitDiffTimeline, index: number) => {
   if (index < 0) {
     return isEmptyTree(t.baseOfOldest) ? 'empty tree' : t.baseOfOldest.slice(0, 7)
@@ -420,28 +451,34 @@ const nodeTag = (t: GitDiffTimeline, index: number) => {
 
 const when = (seconds: number) => `${shortDate(seconds)}, ${formatTime(seconds)}`
 
-/** What a click does next: wait for the second commit, or start a comparison. */
-const clickHint = (t: GitDiffTimeline) => {
-  const waiting = nodeIds(t).indexOf(t.anchor)
+/** How long before `now` that was, in words: `just now`, `5 min ago`, `3 h ago`, `2 days ago`. */
+const ago = (seconds: number, now: number) => {
+  const past = Math.max(0, now - seconds)
 
-  return waiting < 0
-    ? 'Click a commit to see its changes · click two to compare them'
-    : `Click another commit to compare it with ${nodeName(t, waiting)}`
+  if (past < 60) {
+    return 'just now'
+  }
+
+  return past < 3600
+    ? `${Math.floor(past / 60)} min ago`
+    : past < 86_400
+      ? `${Math.floor(past / 3600)} h ago`
+      : `${plural(Math.floor(past / 86_400), 'day')} ago`
 }
 
 const rangeTitle = (t: GitDiffTimeline) =>
   t.mode === 'branches'
-    ? `${t.base} ← ${t.compare}`
+    ? `${t.base} → ${t.compare}`
     : `${t.viewing === '' ? '' : `${t.viewing} · `}${nodeName(t, t.from)} → ${nodeName(t, t.to)}`
 
 const roleOf = (t: GitDiffTimeline, index: number): CardNode['role'] =>
   index === t.to ? 'compare' : index === t.from ? 'base' : index > t.from && index < t.to ? 'between' : 'outside'
 
-/** The window of commits the strip shows: where it starts and how many. */
+/** The commits the track shows: where they start and how many. The pick is always among them. */
 const windowOf = (t: GitDiffTimeline, columns: number) => {
   const total = nodeIds(t).length
   const count = visibleCount(columns, total)
-  const start = resolveStart(t.start, count, total)
+  const start = resolveStart(revealStart(t.start, t.from, t.to, count, total), count, total)
 
   return { total, count, start, indexes: Array.from({ length: Math.min(count, total) }, (_, i) => start + i) }
 }
@@ -494,53 +531,49 @@ const capped = <T extends { value: string }>(options: readonly T[], keep: readon
   return options.filter(option => chosen.has(option))
 }
 
-/**
- * The nodes to scroll to, newest first: all of them, or when there are more than a Select takes,
- * 64 spread evenly from the newest to the oldest.
- */
-const jumpIndexes = (total: number): number[] => {
-  const stride = total <= MAX_OPTIONS ? 1 : (total - 1) / (MAX_OPTIONS - 1)
+/** Up to MAX_OPTIONS node indexes from `lo` to `hi`, those nearest `around`, newest first. */
+const nearby = (lo: number, hi: number, around: number): number[] => {
+  const size = Math.max(0, Math.min(MAX_OPTIONS, hi - lo + 1))
+  const first = Math.max(lo, Math.min(around - Math.floor(size / 2), hi - size + 1))
 
-  return Array.from({ length: Math.min(total, MAX_OPTIONS) }, (_, k) => Math.round((Math.min(total, MAX_OPTIONS) - 1 - k) * stride))
+  return Array.from({ length: size }, (_, k) => first + size - 1 - k)
 }
 
-/**
- * The list to scroll by, each node by its day, button label and title, and the one nearest the
- * middle of the window: where the person is.
- */
-const jumpList = (t: GitDiffTimeline, middle: number) => {
-  const ids = nodeIds(t)
-  const indexes = jumpIndexes(ids.length)
-  const nearest = indexes.reduce((best, i) => (Math.abs(i - middle) < Math.abs(best - middle) ? i : best), indexes[0] ?? 0)
+/** A node as a list names it: its pull request or message, then its day. */
+const optionLabel = (t: GitDiffTimeline, index: number) => {
+  const commit = t.commits[index]
 
-  return {
-    value: ids[nearest] ?? '',
-    options: indexes.map(i => {
-      const commit = t.commits[i]
-
-      return {
-        value: ids[i] ?? '',
-        label:
-          commit === undefined
-            ? 'Now · uncommitted changes'
-            : clip(`${shortDate(commit.time)} · ${buttonLabel(commit)} · ${commitTitle(commit)}`, 72),
-      }
-    }),
+  if (index < 0 || commit === undefined) {
+    return clip(index < 0 ? nodeName(t, index) : 'Now · uncommitted changes', 44)
   }
+
+  return `${clip(commitTitle(commit), 36)} · ${shortDate(commit.time)}`
 }
 
-/**
- * A view tab: the open one a plain button, the other quiet. Not `primary`: that marks the
- * commit being looked at, the one thing on the strip that should stand out.
- */
+/** The To list: the nodes around the newer end. The From list: those older than it, down to before the oldest. */
+const toOptions = (t: GitDiffTimeline) =>
+  nearby(0, nodeIds(t).length - 1, t.to).map(i => ({ value: refOf(t, i), label: optionLabel(t, i) }))
+
+const fromOptions = (t: GitDiffTimeline) =>
+  nearby(-1, t.to - 1, t.from).map(i => ({ value: refOf(t, i), label: optionLabel(t, i) }))
+
+/** A view tab: the open one a plain button, the other quiet. Nothing on the strip is `primary`: no button outranks the rest. */
 const tabLook = (isOpen: boolean) => (isOpen ? { variant: 'secondary' as const } : { plain: true as const, dimColor: true })
 
+/** Whether the comparison reads a remote branch (`origin/main`): only then does the age of this computer's copy matter. */
+const readsRemote = (t: GitDiffTimeline) => {
+  const names = t.mode === 'history' ? [t.viewing] : [t.base, t.compare]
+
+  return t.branches.some(branch => branch.isRemote && names.includes(branch.name))
+}
+
 /**
- * How old the remote branches are, and a way to bring them up to date. `origin/main` is this
- * computer's copy of the server's main as of the last fetch: it is never live, so the chip says when.
+ * How old the remote branches are, and a way to bring them up to date, while a remote branch is
+ * in view. `origin/main` is this computer's copy of the server's main as of the last fetch: it is
+ * never live, so the chip says when.
  */
 const remoteChip = (t: GitDiffTimeline, on: Actions, { Box, Text, Button }: Pick<Kit, 'Box' | 'Text' | 'Button'>) => {
-  if (!t.branches.some(branch => branch.isRemote)) {
+  if (!readsRemote(t)) {
     return null
   }
 
@@ -548,15 +581,18 @@ const remoteChip = (t: GitDiffTimeline, on: Actions, { Box, Text, Button }: Pick
     return <Text dimColor>Fetching…</Text>
   }
 
+  // Without the time it was read at (a state kept from an older version has none), the day and time.
+  const age = t.checkedAt > 0 ? ago(t.fetchedAt, t.checkedAt) : when(t.fetchedAt)
+
   return (
     <Box flexDirection="row" columnGap={1} alignItems="center">
       {t.fetch === 'failed' ? (
         <Text color={ERROR}>{t.fetchNote}</Text>
       ) : t.fetchedAt === 0 ? (
-        <Text dimColor>Remotes: last fetch unknown</Text>
+        <Text dimColor>Fetch time unknown</Text>
       ) : (
         <Text {...(t.isStale ? { color: WARNING } : { dimColor: true })}>
-          {`Remotes fetched ${when(t.fetchedAt)}${t.fetchNote === '' ? '' : ` · ${t.fetchNote}`}`}
+          {`Fetched ${age}${t.fetchNote === '' ? '' : ` · ${t.fetchNote}`}`}
         </Text>
       )}
       <Button key="fetch" plain label="Fetch" onPress={on.fetch} />
@@ -564,78 +600,39 @@ const remoteChip = (t: GitDiffTimeline, on: Actions, { Box, Text, Button }: Pick
   )
 }
 
-/** The strip's first row: History or Branches, how to pick, the files view and a refresh. */
-const controls = (
-  { Box, Text, Button, Select }: Kit,
-  t: GitDiffTimeline,
-  on: Actions,
-  win: ReturnType<typeof windowOf>,
-): RenderElement => {
+/** The strip's first row: History or Branches and whose history, then the files view and a refresh. */
+const header = (kit: Kit, t: GitDiffTimeline, on: Actions): RenderElement => {
+  const { Box, Text, Button, Select } = kit
   const isHistory = t.mode === 'history'
-  const ids = nodeIds(t)
-  const jump = jumpList(t, Math.min(win.total - 1, win.start + Math.floor(win.indexes.length / 2)))
-  const pickers = isHistory ? (
-    <Box flexDirection="row" columnGap={1} alignItems="center" flexWrap="wrap">
-      {Select !== null && t.branches.length > 0 && (
-        <Select
-          key="view-branch"
-          label="Branch"
-          options={viewOptions(t)}
-          value={t.viewing}
-          onSelect={name => on.viewBranch(name)}
-        />
-      )}
-      {Select !== null && ids.length > win.count && (
-        <Select
-          key="go-to"
-          label="Go to"
-          options={jump.options}
-          value={jump.value}
-          onSelect={id => on.goTo(ids.indexOf(id), win.count)}
-        />
-      )}
-      <Text dimColor>{clickHint(t)}</Text>
-    </Box>
-  ) : Select === null ? null : t.branches.length === 0 ? (
-      <Text dimColor>No branches to compare.</Text>
-    ) : (
-      <Box flexDirection="row" columnGap={1} alignItems="center" flexWrap="wrap">
-        <Select
-          key="branch-base"
-          label="Base"
-          options={branchOptions(t)}
-          value={t.base}
-          onSelect={name => on.pickBranch('base', name)}
-        />
-        <Text dimColor>←</Text>
-        <Select
-          key="branch-compare"
-          label="Compare"
-          options={branchOptions(t)}
-          value={t.compare}
-          onSelect={name => on.pickBranch('compare', name)}
-        />
-        <Button key="swap" plain label="⇄" onPress={on.swap} />
-      </Box>
-    )
 
   return (
     <Box flexDirection="row" flexWrap="wrap" columnGap={1} alignItems="center" justifyContent="space-between">
       <Box flexDirection="row" columnGap={1} alignItems="center" flexWrap="wrap">
         <Button key="mode:history" label="History" {...tabLook(isHistory)} onPress={() => on.mode('history')} />
         <Button key="mode:branches" label="Branches" {...tabLook(!isHistory)} onPress={() => on.mode('branches')} />
-        {pickers}
+        {isHistory &&
+          (Select !== null && t.branches.length > 0 ? (
+            <Select
+              key="view-branch"
+              label="Branch"
+              options={viewOptions(t)}
+              value={t.viewing}
+              onSelect={name => on.viewBranch(name)}
+            />
+          ) : (
+            <Text dimColor>{t.viewing === '' ? t.branch : t.viewing}</Text>
+          ))}
       </Box>
       <Box flexDirection="row" columnGap={1} alignItems="center" flexWrap="wrap">
-        {remoteChip(t, on, { Box, Text, Button })}
-        <Button key="details" label="Files changed" onPress={on.details} />
+        {remoteChip(t, on, kit)}
+        <Button key="details" label="View diff" onPress={on.details} />
         <Button key="refresh" plain label="↻" onPress={on.refresh} />
       </Box>
     </Box>
   )
 }
 
-/** The totals as text: the terminal's strip, and the files view's first line. */
+/** The totals as text: the files view's first line. */
 const totals = ({ Box, Text }: Kit, t: GitDiffTimeline): RenderElement => {
   const stat = describeStat(t.stat)
 
@@ -683,119 +680,137 @@ const trackRow = (kit: Kit, t: GitDiffTimeline, indexes: number[]): RenderElemen
   )
 }
 
-/** History: the card (a slider in text on the terminal), and under it a button per commit. */
-const historyStrip = (
-  kit: Kit,
-  t: GitDiffTimeline,
-  columns: number,
-  on: Actions,
-  win: ReturnType<typeof windowOf>,
-): RenderElement => {
-  const { Box, Button, Svg } = kit
-  const { total, count, start, indexes } = win
-  const labels = dayLabels(indexes.map(i => t.commits[i]?.time ?? null))
+/** The terminal's labels under its slider, one per slot: as sparse as the card's. */
+const labelRow = ({ Box, Text }: Kit, t: GitDiffTimeline, indexes: number[], labels: string[]): RenderElement => (
+  <Box flexDirection="row">
+    <Box width={ARROW_W} />
+    {indexes.map((i, k) => (
+      <Box width={SLOT_W} justifyContent="center">
+        {(labels[k] ?? '') !== '' && (
+          <Text {...(i === t.from || i === t.to ? { color: ACCENT, bold: true } : { dimColor: true })} wrap="truncate-end">
+            {labels[k] ?? ''}
+          </Text>
+        )}
+      </Box>
+    ))}
+  </Box>
+)
+
+/** History's picture: the card on the desktop; on the terminal the pick and totals in a line, over a slider in text. */
+const historyView = (kit: Kit, t: GitDiffTimeline, columns: number, win: ReturnType<typeof windowOf>): RenderElement => {
+  const { Box, Text, Svg } = kit
+  const { total, start, indexes } = win
+  const labels = trackLabels(
+    indexes.map(i => t.commits[i]?.time ?? null),
+    indexes.map(i => i === t.from || i === t.to),
+  )
+  const range = { from: nodeTag(t, t.from), to: nodeTag(t, t.to) }
+  const title = `${t.viewing === '' ? t.branch : t.viewing} · ${t.commits.length}${t.hasMore ? '+' : ''} commit${t.commits.length === 1 ? '' : 's'}`
+
+  if (Svg === null) {
+    return (
+      <Box flexDirection="column">
+        <Box flexDirection="row" columnGap={1}>
+          <Text bold>{`${range.from} → ${range.to}`}</Text>
+          <Text dimColor>·</Text>
+          {totals(kit, t)}
+        </Box>
+        {trackRow(kit, t, indexes)}
+        {labelRow(kit, t, indexes, labels)}
+      </Box>
+    )
+  }
+
   const nodes: CardNode[] = indexes.map((i, k) => {
     const commit = t.commits[i]
 
-    return commit === undefined
-      ? { label: 'Now', churn: 0, role: roleOf(t, i), isWorking: true, tip: 'Uncommitted changes' }
-      : {
-          label: labels[k] ?? '',
-          churn: commit.added + commit.deleted,
-          role: roleOf(t, i),
-          isWorking: false,
-          tip: `${commit.short} · ${commitTitle(commit)} · +${commit.added} −${commit.deleted}`,
-        }
+    return {
+      label: labels[k] ?? '',
+      role: roleOf(t, i),
+      isWorking: commit === undefined,
+      tip: commit === undefined ? 'Uncommitted changes' : `${commit.short} · ${commitTitle(commit)} · +${commit.added} −${commit.deleted}`,
+    }
   })
-  const title = `${t.viewing === '' ? t.branch : t.viewing} · ${t.commits.length}${t.hasMore ? '+' : ''} commit${t.commits.length === 1 ? '' : 's'}`
-  const picture =
-    Svg === null ? (
-      <Box flexDirection="column">
-        {totals(kit, t)}
-        {trackRow(kit, t, indexes)}
-      </Box>
-    ) : (
-      <Svg
-        source={historyCard({
-          columns,
-          nodes,
-          title,
-          range: { from: nodeTag(t, t.from), to: nodeTag(t, t.to) },
-          stats: describeStat(t.stat),
-          older: start,
-          newer: total - start - indexes.length,
-          overview: {
-            total,
-            first: start,
-            last: start + indexes.length - 1,
-            pickFrom: t.from,
-            pickTo: t.to,
-            more: t.hasMore,
-          },
-        })}
-        alt={`${title}: ${rangeTitle(t)}`}
-      />
-    )
 
   return (
-    <Box flexDirection="column">
-      {picture}
-      <Box flexDirection="row">
-        <Box width={ARROW_W}>
-          <Button key="prev" plain dimColor={start === 0 && !canLoadOlder(t)} label="‹" onPress={() => on.step(-1, count)} />
-        </Box>
-        {indexes.map(i => {
-          const commit = t.commits[i]
-          const role = roleOf(t, i)
-          const look =
-            role === 'compare'
-              ? { variant: 'primary' as const }
-              : role === 'base'
-                ? { variant: 'secondary' as const }
-                : { plain: true as const, dimColor: role === 'outside' }
-
-          return (
-            <Box width={SLOT_W} justifyContent="center">
-              <Button
-                key={`node:${i}`}
-                label={commit === undefined ? 'Now' : buttonLabel(commit)}
-                {...look}
-                onPress={() => on.pickCommit(i)}
-              />
-            </Box>
-          )
-        })}
-        <Box width={ARROW_W} justifyContent="flex-end">
-          <Button key="next" plain dimColor={start + count >= total} label="›" onPress={() => on.step(1, count)} />
-        </Box>
-      </Box>
-      {messageRow(kit, t, t.from, 'From')}
-      {messageRow(kit, t, t.to, 'To')}
-    </Box>
+    <Svg
+      source={historyCard({
+        columns,
+        nodes,
+        title,
+        range,
+        stats: describeStat(t.stat),
+        older: start,
+        newer: total - start - indexes.length,
+      })}
+      alt={`${title}: ${rangeTitle(t)}`}
+    />
   )
 }
 
-/** One end of the comparison: From or To, its short sha and message, and when, at the right. */
-const messageRow = ({ Box, Text }: Kit, t: GitDiffTimeline, index: number, end: string): RenderElement => {
-  const commit = t.commits[index]
-  const short = index < 0 ? t.baseOfOldest.slice(0, 7) : (commit?.short ?? '')
+/** Cells a Select takes beyond its label and value: the gap, the frame and the arrow. */
+const SELECT_CHROME = 5
+/** Cells the Older and Newer buttons take, with their gaps. */
+const STEP_W = 22
 
-  return (
-    <Box flexDirection="row" columnGap={1}>
-      <Box width={4} flexShrink={0}>
-        <Text dimColor>{end}</Text>
+/**
+ * History's controls, under the card the way its track runs: older on the left, newer on the
+ * right, and between them the two ends of the comparison by name. One row where it fits; on a
+ * narrow band the two buttons keep a row of their own, under the track's ends. The phone has no lists.
+ */
+const historyPickers = (
+  { Box, Text, Button, Select }: Kit,
+  t: GitDiffTimeline,
+  on: Actions,
+  columns: number,
+  count: number,
+): RenderElement => {
+  const canOlder = t.from > -1 || canLoadOlder(t)
+  const canNewer = t.to < nodeIds(t).length - 1
+  const older = <Button key="older" label="‹ Older" dimColor={!canOlder} onPress={() => on.shift(-1, count)} />
+  const newer = <Button key="newer" label="Newer ›" dimColor={!canNewer} onPress={() => on.shift(1, count)} />
+
+  if (Select === null) {
+    return (
+      <Box flexDirection="row" columnGap={1} alignItems="center" justifyContent="space-between">
+        {older}
+        <Text>{`${nodeTag(t, t.from)} → ${nodeTag(t, t.to)}`}</Text>
+        {newer}
       </Box>
-      {short !== '' && <Text dimColor>{short}</Text>}
-      <Box flexGrow={1} flexShrink={1}>
-        <Text wrap="truncate-end">{nodeName(t, index)}</Text>
+    )
+  }
+
+  const from = optionLabel(t, t.from)
+  const to = optionLabel(t, t.to)
+  const ends = (
+    <Box flexDirection="row" columnGap={1} alignItems="center" flexWrap="wrap" justifyContent="center">
+      <Select key="from" label="From" options={fromOptions(t)} value={refOf(t, t.from)} onSelect={id => on.pickFrom(id, count)} />
+      <Box flexDirection="row" columnGap={1} alignItems="center">
+        <Text dimColor>→</Text>
+        <Select key="to" label="To" options={toOptions(t)} value={refOf(t, t.to)} onSelect={id => on.pickTo(id, count)} />
       </Box>
-      {commit !== undefined && <Text dimColor>{when(commit.time)}</Text>}
+    </Box>
+  )
+
+  return 'From To →'.length + from.length + to.length + 2 * SELECT_CHROME + STEP_W <= columns ? (
+    <Box flexDirection="row" flexWrap="wrap" columnGap={1} alignItems="center" justifyContent="space-between">
+      {older}
+      {ends}
+      {newer}
+    </Box>
+  ) : (
+    <Box flexDirection="column">
+      <Box flexDirection="row" justifyContent="space-between">
+        {older}
+        {newer}
+      </Box>
+      {ends}
     </Box>
   )
 }
 
 /** Branches: the fork card, or a line of words on the terminal. */
-const branchStrip = (kit: Kit, t: GitDiffTimeline, columns: number): RenderElement => {
+const branchView = (kit: Kit, t: GitDiffTimeline, columns: number): RenderElement => {
   const { Box, Text, Svg } = kit
   const compared = t.branchCompare
   const ahead = compared?.ahead ?? 0
@@ -831,14 +846,43 @@ const branchStrip = (kit: Kit, t: GitDiffTimeline, columns: number): RenderEleme
   )
 }
 
+/** Branches' controls, under the card: the two branches, the base first, and a swap. */
+const branchPickers = ({ Box, Text, Button, Select }: Kit, t: GitDiffTimeline, on: Actions): RenderElement | null => {
+  if (Select === null) {
+    return null
+  }
+
+  if (t.branches.length === 0) {
+    return <Text dimColor>No branches to compare.</Text>
+  }
+
+  return (
+    <Box flexDirection="row" flexWrap="wrap" columnGap={1} alignItems="center" justifyContent="center">
+      <Select key="branch-base" label="Base" options={branchOptions(t)} value={t.base} onSelect={name => on.pickBranch('base', name)} />
+      <Text dimColor>→</Text>
+      <Select
+        key="branch-compare"
+        label="Compare"
+        options={branchOptions(t)}
+        value={t.compare}
+        onSelect={name => on.pickBranch('compare', name)}
+      />
+      <Button key="swap" label="⇄ Swap" onPress={on.swap} />
+    </Box>
+  )
+}
+
+/** The strip: a row of what to show, the card, and under it a row to pick with. */
 const strip = (kit: Kit, t: GitDiffTimeline, columns: number, on: Actions): RenderElement => {
   const { Box } = kit
   const win = windowOf(t, columns)
+  const isHistory = t.mode === 'history'
 
   return (
     <Box flexDirection="column">
-      {controls(kit, t, on, win)}
-      {t.mode === 'history' ? historyStrip(kit, t, columns, on, win) : branchStrip(kit, t, columns)}
+      {header(kit, t, on)}
+      {isHistory ? historyView(kit, t, columns, win) : branchView(kit, t, columns)}
+      {isHistory ? historyPickers(kit, t, on, columns, win.count) : branchPickers(kit, t, on)}
     </Box>
   )
 }

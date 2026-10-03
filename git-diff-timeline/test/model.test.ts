@@ -6,7 +6,6 @@ import {
   INITIAL,
   WORKING,
   buttonLabel,
-  clickCommit,
   commitRange,
   commitTitle,
   describeFetch,
@@ -18,6 +17,9 @@ import {
   refOf,
   selectionKey,
   settleFetch,
+  shifted,
+  withFrom,
+  withTo,
 } from '../hooks/model'
 
 const commit = (n: number) => ({
@@ -78,16 +80,27 @@ describe('what is picked', () => {
     expect(commitRange(0)).toEqual({ from: -1, to: 0 })
   })
 
-  test('one click shows that commit and waits; a second click compares the two; the next starts over', () => {
-    const t = ready(6)
-    const one = clickCommit(t, 2)
-    const two = clickCommit({ ...t, ...one }, 5)
+  test('picking To: a single commit stays a single commit; a range keeps its From while that is older', () => {
+    const single = { from: 4, to: 5 }
+    const range = { from: 1, to: 5 }
 
-    expect(one).toEqual({ from: 1, to: 2, anchor: commit(2).sha })
-    expect(two).toEqual({ from: 2, to: 5, anchor: '' })
-    expect(clickCommit({ ...t, ...one }, 0)).toEqual({ from: 0, to: 2, anchor: '' })
-    expect(clickCommit({ ...t, ...two }, 4)).toEqual({ from: 3, to: 4, anchor: commit(4).sha })
-    expect(clickCommit({ ...t, ...one }, 2)).toEqual({ from: 1, to: 2, anchor: '' })
+    expect(withTo(single, 2)).toEqual({ from: 1, to: 2 })
+    expect(withTo(range, 3)).toEqual({ from: 1, to: 3 })
+    expect(withTo(range, 1)).toEqual({ from: 0, to: 1 })
+    expect(withTo(range, 0)).toEqual({ from: -1, to: 0 })
+  })
+
+  test('picking From makes a range, and must stay older than To', () => {
+    expect(withFrom({ from: 4, to: 5 }, 1)).toEqual({ from: 1, to: 5 })
+    expect(withFrom({ from: 4, to: 5 }, -1)).toEqual({ from: -1, to: 5 })
+    expect(withFrom({ from: 4, to: 5 }, 5)).toEqual({ from: 4, to: 5 })
+  })
+
+  test('Older and Newer move both ends one commit, and stop at the ends of what is loaded', () => {
+    expect(shifted({ from: 4, to: 5 }, -1, 6)).toEqual({ from: 3, to: 4 })
+    expect(shifted({ from: 1, to: 3 }, 1, 6)).toEqual({ from: 2, to: 4 })
+    expect(shifted({ from: -1, to: 0 }, -1, 6)).toBeNull()
+    expect(shifted({ from: 4, to: 5 }, 1, 6)).toBeNull()
   })
 
   test('the commits a comparison takes in, newest first', () => {
@@ -145,11 +158,12 @@ describe('refreshing', () => {
     expect(merge(shown, loaded(6), '/repo')).toMatchObject({ stat: null, open: [], patches: [] })
   })
 
-  test('a first click still waiting survives a refresh while its commit is there', () => {
-    const waiting: GitDiffTimeline = { ...ready(5), ...clickCommit(ready(5), 2), isPinned: true }
+  test('a pick that reaches before the oldest commit is found again once older commits are loaded', () => {
+    const oldest: GitDiffTimeline = { ...ready(3), from: -1, to: 1, isPinned: true, limit: 3 }
+    // The commit before the oldest, `parent0`, is a commit of the timeline now.
+    const more = { ...loaded(3), commits: [{ ...commit(9), sha: 'parent0' }, ...loaded(3).commits], baseOfOldest: 'parent9' }
 
-    expect(merge(waiting, loaded(6), '/repo').anchor).toBe(commit(2).sha)
-    expect(merge(waiting, { ...loaded(5), commits: loaded(5).commits.slice(3) }, '/repo').anchor).toBe('')
+    expect(merge(oldest, more, '/repo')).toMatchObject({ from: 0, to: 2, isPinned: true })
   })
 
   test('outside a repository nothing is picked', () => {

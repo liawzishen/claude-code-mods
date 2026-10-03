@@ -1,19 +1,19 @@
-import { slotCenter } from './layout'
+import { ARROW_W } from './layout'
 
 /**
  * The cards the desktop draws as one Svg each. Minimal, with a few physical cues lit from
  * above: a raised card, the commits on a recessed track, the compared span a lit bar in
  * that track with a raised knob at each end, and a summary pill on top. The colours are
  * the app's own; the card is light, and dark where the app is (a media query inside the
- * Svg). Units are tenths of a cell, so a knob drawn at a slot's centre sits over the
- * commit button in that slot below the card.
+ * Svg). Units are tenths of a cell. The card is a picture: the controls under it pick.
  */
 
 /** viewBox units per cell: a card is `columns * CELL` wide. */
 export const CELL = 10
 
-/** viewBox units down: both cards are this tall. */
-export const HEIGHT = 156
+/** viewBox units down: the history card, and the taller branch card with its fork. */
+export const HEIGHT = 124
+export const BRANCH_HEIGHT = 156
 
 const PILL_Y = 28
 const PILL_H = 32
@@ -23,16 +23,16 @@ const SIDE_SIZE = 14
 const LABEL_SIZE = 15
 /** Track ends, from the card's sides. */
 const EDGE = 20
-const TRACK_Y = 106
+/** The history card's track and the labels under it. */
+const TRACK_Y = 76
+const LABEL_Y = 106
 const TRACK_H = 12
 const SPAN_H = 8
 const KNOB_R = 10
-const BAR_BASE = 92
-const BAR_MAX = 30
-const BAR_W = 8
-const LABEL_Y = 138
+/** The branch card's rail, base track and labels. */
 const RAIL_Y = 70
 const BASE_Y = 110
+const BRANCH_LABEL_Y = 138
 const MAX_DOTS = 12
 
 const SANS = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
@@ -50,11 +50,9 @@ const LIGHT = {
   groove: '#ebe9e3',
   grooveTop: '#d3cfc6',
   dot: '#7f7c73',
-  bar: '#d9d5cb',
   knob: '#ffffff',
   knobLow: '#ecebe5',
   stop: '#ffffff',
-  barLit: '#ebb4a1',
   accent: '#d77757',
   accentHigh: '#e99a7e',
   added: '#2c7a39',
@@ -75,11 +73,9 @@ const DARK: Record<Tone, string> = {
   groove: '#211f1d',
   grooveTop: '#141312',
   dot: '#8f8c83',
-  bar: '#4d4b46',
   knob: '#f4f3ee',
   knobLow: '#d3d0c7',
   stop: '#fbefe9',
-  barLit: '#b9654a',
   accent: '#d77757',
   accentHigh: '#e7917a',
   added: '#4eba65',
@@ -91,10 +87,8 @@ const DARK_RULES = (Object.keys(DARK) as Tone[])
   .join('')
 
 export type CardNode = {
-  /** Under the knob or dot: `Jul 4`, `Now`. */
+  /** Under the knob or dot: `Jul 4`, `Now`; '' for none. */
   label: string
-  /** Lines changed: the height of its bar over the track. */
-  churn: number
   role: 'outside' | 'base' | 'between' | 'compare'
   isWorking: boolean
   /** What the dot is, for a reader that hovers or cannot see it. */
@@ -103,24 +97,12 @@ export type CardNode = {
 
 export type CardStats = { files: string; added: string; deleted: string } | null
 
-/** Where the window sits in the history loaded, as nodes counted from the oldest. */
-export type CardOverview = {
-  total: number
-  /** The window's first and last node. */
-  first: number
-  last: number
-  /** The compared pair. */
-  pickFrom: number
-  pickTo: number
-  /** True when git holds older commits than are loaded. */
-  more: boolean
-}
-
 export type HistoryCardInput = {
   /** The band's width in cells: the card spans it. */
   columns: number
-  /** The commits in view, oldest first, one per slot. */
+  /** The commits in view, oldest first, spread evenly along the track. */
   nodes: CardNode[]
+  /** What the card shows, for a reader that cannot see it: `main · 16 commits`. */
   title: string
   /** The two ends compared, as the pill names them: a short sha, `#123`, `Now`. */
   range: { from: string; to: string }
@@ -128,8 +110,6 @@ export type HistoryCardInput = {
   /** Commits beyond the view on each side. */
   older: number
   newer: number
-  /** When given, a small scroll bar in the top right tells where the window sits. */
-  overview?: CardOverview
 }
 
 export type BranchCardInput = {
@@ -213,9 +193,9 @@ const pillOf = (center: number, room: number, choices: Span[][]) => {
   }
 }
 
-const open = (width: number, label: string) =>
+const open = (width: number, height: number, label: string) =>
   [
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${HEIGHT}" width="${width * 4}" height="${HEIGHT * 4}" font-family="${SANS}" role="img" aria-label="${esc(label)}">`,
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width * 4}" height="${height * 4}" font-family="${SANS}" role="img" aria-label="${esc(label)}">`,
     `<style>@media (prefers-color-scheme: dark){${DARK_RULES}}</style>`,
     '<defs>',
     `<linearGradient id="card" x1="0" y1="0" x2="0" y2="1">${stopOf(0, 'surface')}${stopOf(1, 'surfaceLow')}</linearGradient>`,
@@ -226,7 +206,7 @@ const open = (width: number, label: string) =>
     '<filter id="shadow-pill" x="-10%" y="-40%" width="120%" height="200%"><feDropShadow dx="0" dy="1" stdDeviation="1.2" flood-color="#000" flood-opacity="0.1"/></filter>',
     '<filter id="shadow-knob" x="-60%" y="-60%" width="220%" height="220%"><feDropShadow dx="0" dy="1.5" stdDeviation="1.5" flood-color="#000" flood-opacity="0.3"/></filter>',
     '</defs>',
-    `<rect x="4" y="3" width="${width - 8}" height="${HEIGHT - 10}" rx="18" fill="url(#card)" filter="url(#shadow-card)"/>`,
+    `<rect x="4" y="3" width="${width - 8}" height="${height - 10}" rx="18" fill="url(#card)" filter="url(#shadow-card)"/>`,
     // The card's top edge catches the light; only the dark card shows it.
     `<path d="M22,3.6 H${width - 22}" stroke="#ffffff" stroke-opacity="0.08" stroke-width="1"/>`,
   ].join('')
@@ -262,54 +242,23 @@ const corner = (text: string, x: number, room: number, anchor: 'start' | 'end') 
     ? ''
     : `<text x="${r(x)}" y="${PILL_Y + 5}" font-size="${SIDE_SIZE}" text-anchor="${anchor}"${fillOf('muted')}>${esc(text)}</text>`
 
-/** Length of the scroll bar, in viewBox units. */
-const SCROLL_LEN = 96
+/** Where node `i` of `count` sits: spread evenly along the track, a short history as wide as a long one. */
+const spot = (i: number, count: number, width: number) => {
+  const pad = ARROW_W * CELL
 
-/**
- * A small scroll bar in the top right: the history loaded, the window over it framed, the compared
- * pair lit, and in words where the window is. Nothing when the whole history is in view.
- */
-const scrollMark = (right: number, room: number, o: CardOverview) => {
-  if (o.total <= 0 || (o.first <= 0 && o.last >= o.total - 1 && !o.more)) {
-    return ''
-  }
-
-  const text = `${o.first + 1}–${o.last + 1} of ${o.total}${o.more ? '+' : ''}`
-  const textW = widthOf(text, SIDE_SIZE)
-
-  if (textW > room) {
-    return ''
-  }
-
-  const label = `<text x="${r(right)}" y="${PILL_Y + 5}" font-size="${SIDE_SIZE}" text-anchor="end"${fillOf('muted')}>${esc(text)}</text>`
-
-  if (room < textW + 12 + SCROLL_LEN) {
-    return label
-  }
-
-  const x0 = right - textW - 12 - SCROLL_LEN
-  const at = (node: number) => x0 + (SCROLL_LEN * node) / o.total
-  const pickX = at(Math.max(0, o.pickFrom))
-  const thumbX = at(o.first)
-
-  return (
-    label +
-    `<rect x="${r(x0)}" y="${PILL_Y - 3}" width="${SCROLL_LEN}" height="6" rx="3"${fillOf('groove')}/>` +
-    `<rect data-scroll="pick" x="${r(pickX)}" y="${PILL_Y - 3}" width="${r(Math.max(3, at(o.pickTo + 1) - pickX))}" height="6" rx="3"${fillOf('accent')}/>` +
-    `<rect data-scroll="window" x="${r(thumbX)}" y="${PILL_Y - 5}" width="${r(Math.max(6, at(o.last + 1) - thumbX))}" height="10" rx="4" fill="none"${strokeOf('soft')} stroke-width="1.4"/>`
-  )
+  return pad + ((i + 0.5) * (width - 2 * pad)) / Math.max(1, count)
 }
 
 /**
- * History: a range slider over the commits in view, with a bar of each commit's size above
- * it. The pick is the lit span between two knobs; the commits whose changes it takes in
- * have their bars lit too.
+ * History: a range slider over the commits in view, as the mockup has it. The pick is the lit
+ * span between two knobs, summed up in the pill on top; the track is labelled sparsely, each
+ * day where it starts and the two knobs.
  */
-export const historyCard = ({ columns, nodes, title, range, stats, older, newer, overview }: HistoryCardInput): string => {
+export const historyCard = ({ columns, nodes, title, range, stats, older, newer }: HistoryCardInput): string => {
   const width = columns * CELL
   const left = EDGE
   const right = width - EDGE
-  const xs = nodes.map((_, i) => slotCenter(i) * CELL)
+  const xs = nodes.map((_, i) => spot(i, nodes.length, width))
   const picked = nodes.map((node, i) => (node.role === 'outside' ? -1 : i)).filter(i => i >= 0)
   const firstPicked = picked[0]
   const lastPicked = picked.at(-1)
@@ -329,29 +278,13 @@ export const historyCard = ({ columns, nodes, title, range, stats, older, newer,
       : [joined(rangeSpans, statSpans(stats, true)), joined(rangeSpans, statSpans(stats, false)), statSpans(stats, false)],
   )
   const sideRoom = width / 2 - pill.width / 2 - 40
-  const beyond = [older > 0 ? `${older} older` : '', newer > 0 ? `${newer} newer` : ''].filter(Boolean).join(' · ')
-  const tallest = Math.log10(1 + Math.max(1, ...nodes.map(node => node.churn)))
   const parts = [
-    open(width, `${title}: ${range.from} to ${range.to}`),
+    open(width, HEIGHT, `${title}: ${range.from} to ${range.to}`),
     pill.svg,
-    corner(title, 24, sideRoom, 'start'),
-    overview === undefined ? corner(beyond, width - 24, sideRoom, 'end') : scrollMark(width - 24, sideRoom, overview),
+    corner(older > 0 ? `${older} older` : '', 24, sideRoom, 'start'),
+    corner(newer > 0 ? `${newer} newer` : '', width - 24, sideRoom, 'end'),
+    groove(left, right, TRACK_Y),
   ]
-
-  nodes.forEach((node, i) => {
-    if (node.churn <= 0) {
-      return
-    }
-
-    const height = 3 + ((BAR_MAX - 3) * Math.log10(1 + node.churn)) / tallest
-    const isIn = node.role === 'between' || node.role === 'compare'
-
-    parts.push(
-      `<rect data-bar="${isIn ? 'in' : 'out'}" x="${r(xs[i]! - BAR_W / 2)}" y="${r(BAR_BASE - height)}" width="${BAR_W}" height="${r(height)}" rx="${BAR_W / 2}"${fillOf(isIn ? 'barLit' : 'bar')}/>`,
-    )
-  })
-
-  parts.push(groove(left, right, TRACK_Y))
 
   if (spanTo > spanFrom) {
     const x1 = Math.max(left + 2, spanFrom - SPAN_H / 2)
@@ -366,10 +299,13 @@ export const historyCard = ({ columns, nodes, title, range, stats, older, newer,
     const x = xs[i]!
     const isPicked = node.role === 'base' || node.role === 'compare'
 
-    parts.push(
-      `<g><title>${esc(node.tip)}</title>${nodeMark(node, i, x)}</g>`,
-      `<text x="${r(x)}" y="${LABEL_Y}" font-size="${LABEL_SIZE}" text-anchor="middle"${fillOf(isPicked ? 'ink' : 'muted')}${isPicked ? ' font-weight="600"' : ''}>${esc(node.label)}</text>`,
-    )
+    parts.push(`<g><title>${esc(node.tip)}</title>${nodeMark(node, i, x)}</g>`)
+
+    if (node.label !== '') {
+      parts.push(
+        `<text x="${r(x)}" y="${LABEL_Y}" font-size="${LABEL_SIZE}" text-anchor="middle"${fillOf(isPicked ? 'ink' : 'muted')}${isPicked ? ' font-weight="600"' : ''}>${esc(node.label)}</text>`,
+      )
+    }
   })
 
   parts.push('</svg>')
@@ -406,7 +342,7 @@ export const branchCard = (input: BranchCardInput): string => {
     words,
   ])
   const parts = [
-    open(width, `${compare} is ${ahead} ahead of and ${behind} behind ${base}`),
+    open(width, BRANCH_HEIGHT, `${compare} is ${ahead} ahead of and ${behind} behind ${base}`),
     pill.svg,
     groove(EDGE, width - EDGE, BASE_Y),
     ...[0.25, 0.5, 0.75].map(at => `<circle cx="${r(fork * at)}" cy="${BASE_Y}" r="3.5"${fillOf('dot')}/>`),
@@ -447,7 +383,7 @@ export const branchCard = (input: BranchCardInput): string => {
 
   if (behind > behindCount) {
     parts.push(
-      `<text x="${r(middle)}" y="${LABEL_Y}" font-size="${SIDE_SIZE}" text-anchor="middle"${fillOf('muted')}>+${behind - behindCount} more</text>`,
+      `<text x="${r(middle)}" y="${BRANCH_LABEL_Y}" font-size="${SIDE_SIZE}" text-anchor="middle"${fillOf('muted')}>+${behind - behindCount} more</text>`,
     )
   }
 
@@ -457,10 +393,10 @@ export const branchCard = (input: BranchCardInput): string => {
   parts.push(
     knob(` cx="${fork}" cy="${BASE_Y}"`, 'accent'),
     `<text ${compareAt} font-size="${LABEL_SIZE}" font-weight="600"${fillOf('ink')}>${esc(compare)}</text>`,
-    `<text x="${tipX + KNOB_R}" y="${LABEL_Y}" font-size="${LABEL_SIZE}" font-weight="600" text-anchor="end"${fillOf('soft')}>${esc(base)}</text>`,
+    `<text x="${tipX + KNOB_R}" y="${BRANCH_LABEL_Y}" font-size="${LABEL_SIZE}" font-weight="600" text-anchor="end"${fillOf('soft')}>${esc(base)}</text>`,
     mergeBase === ''
       ? ''
-      : `<text x="${fork}" y="${LABEL_Y}" font-size="${SIDE_SIZE}" text-anchor="middle"${fillOf('muted')}>${esc(mergeBase)}</text>`,
+      : `<text x="${fork}" y="${BRANCH_LABEL_Y}" font-size="${SIDE_SIZE}" text-anchor="middle"${fillOf('muted')}>${esc(mergeBase)}</text>`,
     '</svg>',
   )
 

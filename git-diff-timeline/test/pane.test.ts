@@ -154,7 +154,7 @@ const GITDIFF: CommandRunInput = {
 }
 
 describe('the strip above the prompt', () => {
-  test('desktop: one click shows that commit and its message, a second click compares the two', async ($, on) => {
+  test('desktop: the card, and From and To name the ends of the comparison; picking one shows it', async ($, on) => {
     let opens = 0
 
     world(on, {
@@ -168,32 +168,42 @@ describe('the strip above the prompt', () => {
     await $.command.run(GITDIFF)
 
     const band = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: BAND, viewport: { columns: 120, rows: 30 } })
+    const options = async (key: string) => ((await band.find({ key }))?.props as { options: { value: string; label: string }[] }).options
 
     expect(await band.find({ type: 'Svg' })).toBeDefined()
     // History has a branch picker: another branch's history is read without checking it out.
     expect(await band.find({ key: 'view-branch' })).toMatchObject({ props: { value: '' } })
-    expect(await band.find({ key: 'go-to' })).toBeUndefined()
-    expect(await band.find({ key: 'node:0' })).toBeDefined()
-    expect(await band.find({ key: 'node:6' })).toMatchObject({ props: { label: 'Now' } })
-    // The open view is a plain tab, the other a quiet one: `primary` is the picked commit's alone.
+    // The open view is a plain tab, the other a quiet one.
     expect(await band.find({ key: 'mode:history' })).toMatchObject({ props: { variant: 'secondary' } })
     expect(await band.find({ key: 'mode:branches' })).toMatchObject({ props: { dimColor: true } })
-    expect(await band.find({ key: 'node:6' })).toMatchObject({ props: { variant: 'primary' } })
-    expect(await band.find({ type: 'Text', text: 'From' })).toBeDefined()
-    expect(await band.find({ type: 'Text', text: 'To' })).toBeDefined()
+    // The newest step: the last commit against the uncommitted changes.
+    expect(await band.find({ key: 'from' })).toMatchObject({ props: { label: 'From', value: sha(5) } })
+    expect(await band.find({ key: 'to' })).toMatchObject({ props: { label: 'To', value: 'working' } })
+    expect((await options('to'))[0]).toEqual({ value: 'working', label: 'Now · uncommitted changes' })
+    expect((await options('to'))[1]?.label).toMatch(/^commit 5 · /)
+    // From lists only what is older than To, down to what the oldest commit is compared with.
+    expect((await options('from')).map(option => option.value)).toEqual([5, 4, 3, 2, 1, 0].map(sha).concat('9'.repeat(40)))
+    // Nothing to click on the card: no button per commit, no hint to learn.
+    expect(await band.find({ key: 'node:0' })).toBeUndefined()
+    expect(await band.find({ type: 'Text', text: 'Click' })).toBeUndefined()
+    expect(await band.find({ key: 'newer' })).toMatchObject({ props: { dimColor: true } })
+    expect(await band.find({ key: 'older' })).toMatchObject({ props: { dimColor: false } })
 
     const before = opens
 
-    await band.press({ key: 'node:2' })
+    // A commit on its own: To moves, and From follows it.
+    await band.select({ key: 'to', value: sha(2) })
 
     expect(opens).toBe(before + 1)
-    expect(await band.find({ type: 'Text', text: 'commit 1' })).toBeDefined()
-    expect(await band.find({ type: 'Text', text: 'commit 2' })).toBeDefined()
-    expect(await band.find({ type: 'Text', text: 'Click another commit' })).toBeDefined()
+    expect(await band.find({ key: 'from' })).toMatchObject({ props: { value: sha(1) } })
+    expect(await band.find({ key: 'to' })).toMatchObject({ props: { value: sha(2) } })
 
-    await band.press({ key: 'node:5' })
+    // A range: From picked on its own, To kept.
+    await band.select({ key: 'to', value: sha(5) })
+    await band.select({ key: 'from', value: sha(2) })
 
-    expect(await band.find({ type: 'Text', text: 'Click another commit' })).toBeUndefined()
+    expect(await band.find({ key: 'from' })).toMatchObject({ props: { value: sha(2) } })
+    expect(await band.find({ key: 'to' })).toMatchObject({ props: { value: sha(5) } })
 
     const pane = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', requestId: 'git-diff', props: PANE, viewport: { columns: 84, rows: 30 } })
 
@@ -204,7 +214,7 @@ describe('the strip above the prompt', () => {
     expect(await pane.find({ type: 'Code' })).toMatchObject({ props: { format: 'diff', path: 'src/app.tsx' } })
   })
 
-  test('terminal: no picture, the same commit buttons', async ($, on) => {
+  test('terminal: no picture, a slider in text, and the same lists', async ($, on) => {
     world(on, { isDirty: false })
     await $.command.run(GITDIFF)
 
@@ -212,34 +222,56 @@ describe('the strip above the prompt', () => {
 
     expect(await band.find({ type: 'Svg' })).toBeUndefined()
     expect(await band.find({ key: 'view-branch' })).toBeDefined()
-    expect(await band.find({ key: 'node:5' })).toMatchObject({ props: { label: sha(5).slice(0, 7) } })
-    expect(await band.find({ key: 'node:6' })).toBeUndefined()
+    expect(await band.find({ key: 'to' })).toMatchObject({ props: { value: sha(5) } })
+    expect(await band.find({ type: 'Text', text: `${sha(4).slice(0, 7)} → ${sha(5).slice(0, 7)}` })).toBeDefined()
 
-    await band.press({ key: 'node:3' })
+    await band.select({ key: 'from', value: sha(2) })
 
-    // A slider in text: a knob at each end of the pick, the track between them drawn heavy.
+    // A knob at each end of the pick, the track between them drawn heavy, and the days under it.
     expect(await band.findAll({ type: 'Text', text: '◉' })).toHaveLength(2)
     expect(await band.find({ type: 'Text', text: '━━━━' })).toBeDefined()
+    expect(await band.find({ type: 'Text', text: 'Jan 4' })).toBeDefined()
 
     const pane = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'Pane', requestId: 'git-diff', props: PANE, viewport: { columns: 84, rows: 30 } })
 
     expect(await pane.find({ type: 'Code' })).toBeDefined()
   })
 
-  test('paging shows older commits', async ($, on) => {
+  test('Older and Newer step the comparison one commit, and the track follows it', async ($, on) => {
     world(on, { isDirty: true })
     await $.command.run(GITDIFF)
 
-    const narrow = { ...BAND, bodyColumns: 40 }
-    const band = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: narrow, viewport: { columns: 40, rows: 30 } })
+    // Room on the track for six of the seven nodes.
+    const narrow = { ...BAND, bodyColumns: 60 }
+    const band = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: narrow, viewport: { columns: 60, rows: 30 } })
+    const ends = async () => [(await band.find({ key: 'from' }))?.props.value, (await band.find({ key: 'to' }))?.props.value]
+    const card = async () => ((await band.find({ type: 'Svg' }))?.props as { source: string }).source
 
-    expect(await band.find({ key: 'node:6' })).toBeDefined()
-    expect(await band.find({ key: 'node:2' })).toBeUndefined()
+    expect(await ends()).toEqual([sha(5), 'working'])
+    expect(await card()).toContain('>1 older<')
 
-    await band.press({ key: 'prev' })
+    await band.press({ key: 'older' })
 
-    expect(await band.find({ key: 'node:2' })).toBeDefined()
-    expect(await band.find({ key: 'node:6' })).toBeUndefined()
+    expect(await ends()).toEqual([sha(4), sha(5)])
+
+    for (let step = 0; step < 5; step += 1) {
+      await band.press({ key: 'older' })
+    }
+
+    // The oldest commit on its own, against the commit before it; the track went with it.
+    expect(await ends()).toEqual(['9'.repeat(40), sha(0)])
+    expect(await card()).toContain('>1 newer<')
+    expect(await card()).not.toContain(' older<')
+    expect(await band.find({ key: 'older' })).toMatchObject({ props: { dimColor: true } })
+
+    // Nothing older to read: Older does nothing.
+    await band.press({ key: 'older' })
+
+    expect(await ends()).toEqual(['9'.repeat(40), sha(0)])
+
+    await band.press({ key: 'newer' })
+
+    expect(await ends()).toEqual([sha(0), sha(1)])
   })
 
   test('branches: two branches, how far apart they are, and what the compare branch adds', async ($, on) => {
@@ -254,6 +286,9 @@ describe('the strip above the prompt', () => {
     expect(await band.find({ key: 'branch-base' })).toMatchObject({ props: { value: 'origin/main' } })
     expect(await band.find({ key: 'branch-compare' })).toMatchObject({ props: { value: 'main' } })
     expect(await band.find({ type: 'Svg' })).toBeDefined()
+    // History's own controls are gone with it.
+    expect(await band.find({ key: 'view-branch' })).toBeUndefined()
+    expect(await band.find({ key: 'older' })).toBeUndefined()
 
     await band.select({ key: 'branch-compare', value: 'feature' })
 
@@ -262,6 +297,10 @@ describe('the strip above the prompt', () => {
     expect(await pane.find({ type: 'Text', text: '9 commits ahead, 5 behind' })).toBeDefined()
     expect(await pane.find({ type: 'Code' })).toBeDefined()
     expect(diffs.some(argv => argv.includes('origin/main...feature'))).toBe(true)
+
+    await band.press({ key: 'swap' })
+
+    expect(await band.find({ key: 'branch-base' })).toMatchObject({ props: { value: 'feature' } })
   })
 
   test('another branch’s history is read from its ref, with no checkout, and has no uncommitted changes', async ($, on) => {
@@ -270,8 +309,9 @@ describe('the strip above the prompt', () => {
     await $.command.run(GITDIFF)
 
     const band = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: BAND, viewport: { columns: 120, rows: 30 } })
+    const toValues = async () => ((await band.find({ key: 'to' }))?.props as { options: { value: string }[] }).options.map(o => o.value)
 
-    expect(await band.find({ key: 'node:6' })).toMatchObject({ props: { label: 'Now' } })
+    expect(await band.find({ key: 'to' })).toMatchObject({ props: { value: 'working' } })
 
     await band.select({ key: 'view-branch', value: 'origin/main' })
 
@@ -280,8 +320,8 @@ describe('the strip above the prompt', () => {
     expect(log?.slice(-2)).toEqual(['refs/remotes/origin/main', '--'])
     expect(runs.some(argv => ['checkout', 'switch', 'reset', 'merge'].includes(argv[1] ?? ''))).toBe(false)
     expect(await band.find({ key: 'view-branch' })).toMatchObject({ props: { value: 'origin/main' } })
-    expect(await band.find({ key: 'node:5' })).toBeDefined()
-    expect(await band.find({ key: 'node:6' })).toBeUndefined()
+    expect(await band.find({ key: 'to' })).toMatchObject({ props: { value: sha(5) } })
+    expect(await toValues()).not.toContain('working')
     expect(await band.find({ type: 'Svg' })).toMatchObject({ props: { alt: expect.stringMatching(/^origin\/main · 6 commits/) } })
 
     const pane = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', requestId: 'git-diff', props: PANE, viewport: { columns: 84, rows: 30 } })
@@ -290,31 +330,11 @@ describe('the strip above the prompt', () => {
 
     await band.select({ key: 'view-branch', value: '' })
 
-    expect(await band.find({ key: 'node:6' })).toMatchObject({ props: { label: 'Now' } })
+    expect(await band.find({ key: 'to' })).toMatchObject({ props: { value: 'working' } })
     expect(runs.filter(argv => argv[1] === 'log').at(-1)).not.toContain('refs/remotes/origin/main')
   })
 
-  test('Go to scrolls the timeline to any commit, however far', async ($, on) => {
-    world(on, { isDirty: true })
-    await $.command.run(GITDIFF)
-
-    const narrow = { ...BAND, bodyColumns: 40 }
-    const band = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: narrow, viewport: { columns: 40, rows: 30 } })
-
-    expect(await band.find({ key: 'node:6' })).toBeDefined()
-    expect(await band.find({ key: 'node:0' })).toBeUndefined()
-    // It shows where the window is: the commit in its middle.
-    expect(await band.find({ key: 'go-to' })).toMatchObject({ props: { value: sha(5) } })
-
-    await band.select({ key: 'go-to', value: sha(1) })
-
-    expect(await band.find({ key: 'node:0' })).toBeDefined()
-    expect(await band.find({ key: 'node:2' })).toBeDefined()
-    expect(await band.find({ key: 'node:6' })).toBeUndefined()
-    expect(await band.find({ key: 'go-to' })).toMatchObject({ props: { value: sha(1) } })
-  })
-
-  test('scrolling back past the oldest commit loaded reads older ones, and the window stays on its commits', async ($, on) => {
+  test('Older past the oldest commit loaded reads older ones, and the lists hold at most 64 commits', async ($, on) => {
     const runs: string[][] = []
     const total = 150
 
@@ -328,10 +348,16 @@ describe('the strip above the prompt', () => {
       runs.push([...argv])
 
       switch (sub) {
-        case 'rev-parse':
-          return flag === '--is-inside-work-tree'
-            ? answer('true\n')
-            : answer(argv.some(arg => arg.endsWith('^')) ? `${'9'.repeat(40)}\n` : `${sha(total - 1)}\n`)
+        case 'rev-parse': {
+          if (flag === '--is-inside-work-tree') {
+            return answer('true\n')
+          }
+
+          // A commit's parent is the commit before it.
+          const parent = argv.find(arg => arg.endsWith('^'))
+
+          return answer(`${parent === undefined ? sha(total - 1) : sha(Number(parent.slice(0, -1)) - 1)}\n`)
+        }
         case 'branch':
           return answer('main\n')
         case 'for-each-ref':
@@ -352,34 +378,34 @@ describe('the strip above the prompt', () => {
 
     const band = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: BAND, viewport: { columns: 120, rows: 30 } })
     const asked = () => runs.filter(argv => argv[1] === 'log').map(argv => argv[argv.indexOf('-n') + 1])
+    const values = async (key: string) => ((await band.find({ key }))?.props as { options: { value: string }[] }).options.map(o => o.value)
 
     expect(await band.find({ type: 'Svg' })).toMatchObject({ props: { alt: expect.stringMatching(/^main · 60\+ commits/) } })
     expect(asked()).toEqual(['60'])
+    expect(await values('to')).toHaveLength(60)
 
-    const waypoints = async () => ((await band.find({ key: 'go-to' }))?.props as { options: { value: string }[] }).options
+    // The oldest commit loaded on its own, then one older: git is asked for 60 more.
+    await band.select({ key: 'to', value: sha(90) })
 
-    // 60 commits are all listed, newest to oldest.
-    expect(await waypoints()).toHaveLength(60)
+    expect(await band.find({ key: 'from' })).toMatchObject({ props: { value: sha(89) } })
 
-    // Pages of 11 from the newest window (49–60): 38, 27, 16, 5, then the oldest, 1.
-    for (let page = 0; page < 5; page += 1) {
-      await band.press({ key: 'prev' })
-    }
-
-    expect(asked()).toEqual(['60'])
-    expect(await band.find({ type: 'Svg' })).toMatchObject({ props: { source: expect.stringMatching(/1–12 of 60\+/) } })
-
-    await band.press({ key: 'prev' })
+    await band.press({ key: 'older' })
 
     expect(asked()).toEqual(['60', '120'])
-    // The 60 older commits came in before the window's: it paged back onto them, one page.
     expect(await band.find({ type: 'Svg' })).toMatchObject({ props: { alt: expect.stringMatching(/^main · 120\+ commits/) } })
-    expect(await band.find({ type: 'Svg' })).toMatchObject({ props: { source: expect.stringMatching(/50–61 of 120\+/) } })
+    expect(await band.find({ key: 'to' })).toMatchObject({ props: { value: sha(89) } })
+    expect(await band.find({ key: 'from' })).toMatchObject({ props: { value: sha(88) } })
 
-    // A dropdown takes 64 options at most: 120 commits are 64 waypoints, the newest and the oldest among them.
-    expect(await waypoints()).toHaveLength(64)
-    expect((await waypoints())[0]?.value).toBe(sha(149))
-    expect((await waypoints()).at(-1)?.value).toBe(sha(30))
+    // A list takes 64 options at most: To the commits around the pick, From all that are older than To.
+    const to = await values('to')
+    const from = await values('from')
+
+    expect(to).toHaveLength(64)
+    expect(to).toContain(sha(89))
+    expect(to).toContain(sha(149 - 59 - 30))
+    expect(from).toHaveLength(60)
+    expect(from[0]).toBe(sha(88))
+    expect(from.at(-1)).toBe(sha(29))
   })
 
   test('stays out of the way outside a repository', async ($, on) => {
@@ -405,7 +431,7 @@ describe('the strip above the prompt', () => {
 
     const band = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: BAND, viewport: { columns: 120, rows: 30 } })
 
-    expect(await band.find({ key: 'node:0' })).toBeUndefined()
+    expect(await band.find({ key: 'to' })).toBeUndefined()
   })
 
   test('a session start closes a leftover side pane in band mode', async ($, on) => {
@@ -461,15 +487,20 @@ describe('the remote branches', () => {
   const band = ($: Engine) =>
     $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: BAND, viewport: { columns: 120, rows: 30 } })
 
-  test('say when they were fetched, and Fetch brings them up to date and says what moved', async ($, on) => {
+  test('say when they were fetched while one is in view, and Fetch brings them up to date and says what moved', async ($, on) => {
     const { runs, fetches } = world(on, { isDirty: false, fetchedAgo: 3 * 3600 })
 
     await $.command.run(GITDIFF)
 
     const ui = await band($)
 
-    // origin/main is this computer’s copy as of the last fetch, not live data: the chip says when.
-    expect(await ui.find({ type: 'Text', text: 'Remotes fetched' })).toMatchObject({ props: { dimColor: true } })
+    // The local branch's history: how old the remote copies are does not matter, so nothing says it.
+    expect(await ui.find({ key: 'fetch' })).toBeUndefined()
+
+    // Branches compares with origin/main: this computer’s copy as of the last fetch, not live data.
+    await ui.press({ key: 'mode:branches' })
+
+    expect(await ui.find({ type: 'Text', text: 'Fetched 3 h ago' })).toMatchObject({ props: { dimColor: true } })
 
     await ui.press({ key: 'fetch' })
 
@@ -483,11 +514,16 @@ describe('the remote branches', () => {
     expect(await ui.find({ type: 'Text', text: 'nothing new' })).toBeDefined()
   })
 
-  test('a fetch more than a day ago is a warning; a repository that never fetched says it does not know', async ($, on) => {
+  test('a fetch more than a day ago is a warning', async ($, on) => {
     world(on, { isDirty: false, fetchedAgo: 3 * 86_400 })
     await $.command.run(GITDIFF)
 
-    expect(await (await band($)).find({ type: 'Text', text: 'Remotes fetched' })).toMatchObject({ props: { color: 'warning' } })
+    const ui = await band($)
+
+    // origin/main's own history is a remote branch in view too.
+    await ui.select({ key: 'view-branch', value: 'origin/main' })
+
+    expect(await ui.find({ type: 'Text', text: 'Fetched 3 days ago' })).toMatchObject({ props: { color: 'warning' } })
   })
 
   test('without a fetch time from git, the chip does not guess', async ($, on) => {
@@ -496,7 +532,9 @@ describe('the remote branches', () => {
 
     const ui = await band($)
 
-    expect(await ui.find({ type: 'Text', text: 'last fetch unknown' })).toBeDefined()
+    await ui.press({ key: 'mode:branches' })
+
+    expect(await ui.find({ type: 'Text', text: 'Fetch time unknown' })).toBeDefined()
     expect(await ui.find({ key: 'fetch' })).toBeDefined()
   })
 
@@ -506,6 +544,7 @@ describe('the remote branches', () => {
 
     const ui = await band($)
 
+    await ui.press({ key: 'mode:branches' })
     await ui.press({ key: 'fetch' })
 
     expect(await ui.find({ type: 'Text', text: "Fetch failed: fatal: Authentication failed for 'https://gitlab.example/x.git/'" })).toMatchObject({
@@ -562,7 +601,7 @@ describe('the files view', () => {
     const pane = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'Pane', requestId: 'git-diff', props: PANE, viewport: { columns: 84, rows: 30 } })
 
     expect(await pane.find({ type: 'Svg' })).toBeDefined()
-    expect(await pane.find({ key: 'node:5' })).toBeDefined()
+    expect(await pane.find({ key: 'to' })).toBeDefined()
     expect(await pane.find({ type: 'Code' })).toBeDefined()
   })
 

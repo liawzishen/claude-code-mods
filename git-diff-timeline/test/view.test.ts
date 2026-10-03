@@ -5,19 +5,18 @@ import type { CardNode } from '../hooks/card'
 import {
   ARROW_W,
   SLOT_W,
-  centerStart,
   dayLabels,
   formatDate,
   formatTime,
   resolveStart,
+  revealStart,
   slotCenter,
-  stepStart,
+  trackLabels,
   visibleCount,
 } from '../hooks/layout'
 
-const node = (label: string, role: CardNode['role'], churn = 10): CardNode => ({
+const node = (label: string, role: CardNode['role']): CardNode => ({
   label,
-  churn,
   role,
   isWorking: false,
   tip: `${label} tip`,
@@ -26,35 +25,36 @@ const node = (label: string, role: CardNode['role'], churn = 10): CardNode => ({
 const attr = (svg: string, name: string) => [...svg.matchAll(new RegExp(`${name}="([^"]*)"`, 'g'))].map(m => m[1])
 
 describe('layout', () => {
-  test('visibleCount fits whole commit slots between the paging arrows, at least two', () => {
+  test('visibleCount fits whole commit slots on the track, at least two', () => {
     expect(visibleCount(95, 60)).toBe(Math.floor((95 - 2 * ARROW_W) / SLOT_W))
     expect(visibleCount(20, 60)).toBe(2)
     expect(visibleCount(200, 3)).toBe(3)
   })
 
-  test('a slot centre sits past the left arrow', () => {
+  test('a slot centre sits past the track’s left end', () => {
     expect(slotCenter(0)).toBe(ARROW_W + SLOT_W / 2)
     expect(slotCenter(2)).toBe(ARROW_W + 2 * SLOT_W + SLOT_W / 2)
   })
 
-  test('the window follows the newest unless paged, and pages with overlap', () => {
+  test('the window follows the newest unless moved', () => {
     expect(resolveStart(-1, 5, 12)).toBe(7)
     expect(resolveStart(99, 5, 12)).toBe(7)
     expect(resolveStart(2, 5, 12)).toBe(2)
-    expect(stepStart(-1, -1, 5, 12)).toBe(3)
-    expect(stepStart(3, -1, 5, 12)).toBe(0)
-    expect(stepStart(0, 1, 5, 12)).toBe(4)
-    expect(stepStart(4, 1, 5, 12)).toBe(-1)
     expect(resolveStart(-1, 5, 3)).toBe(0)
   })
 
-  test('a jump puts the node in the middle of the window, and the newest window follows the newest', () => {
-    expect(centerStart(20, 5, 60)).toBe(18)
-    expect(centerStart(1, 5, 60)).toBe(0)
-    expect(centerStart(59, 5, 60)).toBe(-1)
-    expect(centerStart(57, 5, 60)).toBe(-1)
-    expect(centerStart(56, 5, 60)).toBe(54)
-    expect(centerStart(2, 5, 3)).toBe(-1)
+  test('the window stays while the pick is in view, else centres on it, or on its newer end when too wide', () => {
+    // In view: nothing moves; the newest window keeps following the newest.
+    expect(revealStart(-1, 9, 10, 5, 12)).toBe(-1)
+    expect(revealStart(3, 4, 6, 5, 12)).toBe(3)
+    // Out of view: centred.
+    expect(revealStart(-1, 3, 4, 5, 12)).toBe(2)
+    expect(revealStart(0, 7, 8, 5, 20)).toBe(6)
+    // Wider than the window: the newer end at the right.
+    expect(revealStart(-1, 0, 9, 5, 12)).toBe(5)
+    // Before the oldest commit counts as the oldest; centred near the end, it is the newest window.
+    expect(revealStart(5, -1, 0, 5, 12)).toBe(0)
+    expect(revealStart(0, 10, 11, 5, 12)).toBe(-1)
   })
 
   test('a dot reads as its day where the day changes, else as its time, and the working tree as Now', () => {
@@ -69,6 +69,13 @@ describe('layout', () => {
     ])
   })
 
+  test('the track is labelled sparsely: each day where it starts, the two picked dots, and Now', () => {
+    const at = (day: number, h: number) => Math.floor(new Date(2026, 6, day, h, 0).getTime() / 1000)
+    const times = [at(3, 9), at(3, 11), at(3, 15), at(4, 9), at(4, 10), null]
+
+    expect(trackLabels(times, [false, false, true, false, false, false])).toEqual(['Jul 3', '', '3:00 PM', 'Jul 4', '', 'Now'])
+  })
+
   test('dates and times', () => {
     const seconds = (h: number, m: number) => Math.floor(new Date(2026, 3, 3, h, m).getTime() / 1000)
 
@@ -79,26 +86,38 @@ describe('layout', () => {
 })
 
 describe('the history card', () => {
-  const nodes = [node('Jul 2', 'outside'), node('Jul 3', 'base'), node('Jul 4', 'compare', 300)]
+  const nodes = [node('Jul 2', 'outside'), node('Jul 3', 'base'), node('Jul 4', 'compare')]
   const stats = { files: '4 files changed', added: '+172', deleted: '−35' }
   const range = { from: 'a3e3a24', to: 'b5d4801' }
   const svg = historyCard({ columns: 95, nodes, title: 'main · 3 commits', range, stats, older: 2, newer: 0 })
 
-  test('is one svg as wide as the band, a dot per commit at its slot centre', () => {
-    const centres = [...svg.matchAll(/data-node="(\d+)" cx="([\d.]+)"/g)].map(m => [Number(m[1]), Number(m[2])])
+  test('is one svg as wide as the band, its dots spread evenly along the track', () => {
+    const centres = [...svg.matchAll(/data-node="(\d+)" cx="([\d.]+)"/g)].map(m => Number(m[2]))
+    const width = 95 * CELL
 
     expect(svg.startsWith('<svg')).toBe(true)
     expect(svg.endsWith('</svg>')).toBe(true)
-    expect(attr(svg, 'viewBox')[0]).toBe(`0 0 ${95 * CELL} ${HEIGHT}`)
-    expect(centres).toEqual(nodes.map((_, i) => [i, slotCenter(i) * CELL]))
+    expect(attr(svg, 'viewBox')[0]).toBe(`0 0 ${width} ${HEIGHT}`)
+    expect(centres).toHaveLength(3)
+    expect(Math.abs(centres[0]! + centres[2]! - width)).toBeLessThan(0.2)
+    expect(Math.abs(centres[1]! - width / 2)).toBeLessThan(0.2)
+    // As many dots as fit stand a slot apart, at the slot centres.
+    const full = historyCard({ columns: 95, nodes: Array.from({ length: 9 }, () => node('', 'outside')), title: 'main', range, stats, older: 0, newer: 0 })
+    const xs = [...full.matchAll(/data-node="(\d+)" cx="([\d.]+)"/g)].map(m => Number(m[2]))
+
+    expect(xs[1]! - xs[0]!).toBeGreaterThanOrEqual(SLOT_W * CELL - 0.2)
+    expect(xs[0]).toBeGreaterThanOrEqual(slotCenter(0) * CELL - 0.2)
   })
 
-  test('marks the compared pair, and says what is beyond the window', () => {
+  test('marks the compared pair, and says what is beyond the window, and nothing else in the corners', () => {
     expect(attr(svg, 'data-role')).toEqual(['outside', 'base', 'compare'])
     expect(svg).toContain('4 files changed')
     expect(svg).toContain('+172')
     expect(svg).toContain('2 older')
     expect(svg).not.toContain('newer')
+    // The title is for a reader that cannot see the card: the Branch list above names the branch.
+    expect(svg).not.toContain('>main · 3 commits<')
+    expect(svg).toContain('aria-label="main · 3 commits: a3e3a24 to b5d4801"')
   })
 
   test('the pill names both ends and the totals, and keeps the totals when the card is narrow', () => {
@@ -117,10 +136,10 @@ describe('the history card', () => {
     expect(svg).toMatch(/class="f-ink" fill="#[0-9a-f]{6}"/)
   })
 
-  test('lights the bars of the commits the pick takes in, and draws none for a commit with no lines', () => {
-    const bars = historyCard({
+  test('draws a label only where one is given, and no bars over the track', () => {
+    const sparse = historyCard({
       columns: 95,
-      nodes: [node('Jul 1', 'outside', 0), ...nodes],
+      nodes: [node('Jul 1', 'outside'), node('', 'outside'), node('', 'base'), node('Now', 'compare')],
       title: 'main',
       range,
       stats,
@@ -128,7 +147,8 @@ describe('the history card', () => {
       newer: 0,
     })
 
-    expect(attr(bars, 'data-bar')).toEqual(['out', 'out', 'in'])
+    expect([...sparse.matchAll(/<text[^>]*text-anchor="middle"[^>]*>([^<]*)<\/text>/g)].map(m => m[1])).toEqual(['Jul 1', 'Now'])
+    expect(sparse).not.toContain('data-bar')
   })
 
   test('a pick that starts out of view runs from the track’s start', () => {
@@ -146,20 +166,11 @@ describe('the history card', () => {
     expect(Number(x)).toBeLessThan(slotCenter(0) * CELL)
   })
 
-  test('a small scroll bar tells where the window sits, with the compared pair lit on it', () => {
-    const overview = { total: 61, first: 20, last: 29, pickFrom: 22, pickTo: 26, more: true }
-    const bar = historyCard({ columns: 120, nodes, title: 'main', range, stats, older: 20, newer: 31, overview })
+  test('says how many commits are beyond the window on each side', () => {
+    const both = historyCard({ columns: 120, nodes, title: 'main', range, stats, older: 20, newer: 31 })
 
-    expect(bar).toContain('21–30 of 61+')
-    expect(attr(bar, 'data-scroll')).toEqual(['pick', 'window'])
-    expect(bar).not.toContain('older')
-
-    // Everything in view: nothing to scroll. Too narrow for the bar: the words alone.
-    expect(historyCard({ columns: 120, nodes, title: 'main', range, stats, older: 0, newer: 0, overview: { ...overview, first: 0, last: 60, more: false } })).not.toContain('data-scroll')
-
-    const tight = historyCard({ columns: 70, nodes: nodes.slice(1), title: 'main', range, stats, older: 0, newer: 0, overview })
-
-    expect(tight).not.toContain('data-scroll="window"')
+    expect(both).toContain('20 older')
+    expect(both).toContain('31 newer')
   })
 
   test('escapes text', () => {

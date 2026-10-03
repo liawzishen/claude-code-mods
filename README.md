@@ -4,7 +4,7 @@ Mods that change Claude Code's UI, in the terminal and the desktop app's Code ta
 
 | Mod | What it does |
 | --- | --- |
-| [`git-diff-timeline`](git-diff-timeline) | A Git Diff timeline above the prompt, drawn as a range slider over the branch's commits, light or dark with the app. Pick any branch to see its history without switching to it, and scroll back through it. Click one commit to see it or two to compare them, with their commit messages. Says when the remote branches were last fetched, with a Fetch button. A Branches tab compares two branches. A GitHub-style "Files changed" panel shows each file's diff. |
+| [`git-diff-timeline`](git-diff-timeline) | A Git Diff timeline above the prompt, drawn as a clean range slider over the branch's commits, light or dark with the app. Pick any branch to see its history without switching to it. Pick From and To by commit message, or step Older and Newer one commit at a time. Says how long ago the remote branches were fetched, with a Fetch button. A Branches tab compares two branches. A GitHub-style "Files changed" panel shows each file's diff. |
 | [`session-status`](session-status) | A status line: a gauge of how full the context window is, the rate limit nearest to running out (or the cost), and the session's time, prompts and tool calls. |
 
 ## Use them
