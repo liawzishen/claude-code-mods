@@ -46,14 +46,22 @@ const world = (
     fetchedAgo,
     fetchError,
     extraBranches = 0,
-  }: { isDirty: boolean; open?: () => Opened; fetchedAgo?: number; fetchError?: string; extraBranches?: number },
+    cwd = () => '/repo',
+  }: {
+    isDirty: boolean
+    open?: () => Opened | Promise<Opened>
+    fetchedAgo?: number
+    fetchError?: string
+    extraBranches?: number
+    cwd?: () => string
+  },
 ) => {
   const diffs: string[][] = []
   const runs: string[][] = []
   const fetches: { env?: Record<string, string>; timeoutMs?: number }[] = []
   let isFetched = false
 
-  on('session.cwd', () => ({ value: '/repo' }))
+  on('session.cwd', () => ({ value: cwd() }))
   on('command.register', () => ({ value: { command: 'gitdiff' } }))
   on('ui.open', open ?? (() => placed))
 
@@ -183,18 +191,34 @@ describe('the strip above the prompt', () => {
     expect((await options('to'))[1]?.label).toMatch(/^commit 5 · /)
     // From lists only what is older than To, down to what the oldest commit is compared with.
     expect((await options('from')).map(option => option.value)).toEqual([5, 4, 3, 2, 1, 0].map(sha).concat('9'.repeat(40)))
-    // Nothing to click on the card: no button per commit, no hint to learn.
-    expect(await band.find({ key: 'node:0' })).toBeUndefined()
+    // Under each dot of the card, its label is a button: the knobs' stand out. No hint to learn.
+    expect(await band.find({ key: 'node:0' })).toMatchObject({ props: { label: 'Jan 2', plain: true } })
+    expect(await band.find({ key: 'node:5' })).toMatchObject({ props: { label: 'Jan 7', variant: 'secondary' } })
+    expect(await band.find({ key: 'node:6' })).toMatchObject({ props: { label: 'Now', variant: 'primary' } })
     expect(await band.find({ type: 'Text', text: 'Click' })).toBeUndefined()
-    expect(await band.find({ key: 'newer' })).toMatchObject({ props: { dimColor: true } })
-    expect(await band.find({ key: 'older' })).toMatchObject({ props: { dimColor: false } })
+    // ‹ and › under the track's ends.
+    expect(await band.find({ key: 'newer' })).toMatchObject({ props: { label: '›', dimColor: true } })
+    expect(await band.find({ key: 'older' })).toMatchObject({ props: { label: '‹', dimColor: false } })
 
     const before = opens
+
+    // A press on a dot moves the nearer knob there: From, to commit 2.
+    await band.press({ key: 'node:2' })
+
+    expect(opens).toBe(before + 1)
+    expect(await band.find({ key: 'from' })).toMatchObject({ props: { value: sha(2) } })
+    expect(await band.find({ key: 'to' })).toMatchObject({ props: { value: 'working' } })
+    expect(await band.find({ key: 'node:2' })).toMatchObject({ props: { variant: 'secondary' } })
+
+    // A press on a knob shows that commit alone.
+    await band.press({ key: 'node:6' })
+
+    expect(await band.find({ key: 'from' })).toMatchObject({ props: { value: sha(5) } })
+    expect(await band.find({ key: 'to' })).toMatchObject({ props: { value: 'working' } })
 
     // A commit on its own: To moves, and From follows it.
     await band.select({ key: 'to', value: sha(2) })
 
-    expect(opens).toBe(before + 1)
     expect(await band.find({ key: 'from' })).toMatchObject({ props: { value: sha(1) } })
     expect(await band.find({ key: 'to' })).toMatchObject({ props: { value: sha(2) } })
 
@@ -214,6 +238,70 @@ describe('the strip above the prompt', () => {
     expect(await pane.find({ type: 'Code' })).toMatchObject({ props: { format: 'diff', path: 'src/app.tsx' } })
   })
 
+  test('a press moves the strip at once: it does not wait for the desktop to say it drew the pane', async ($, on) => {
+    let opens = 0
+    let answer = () => undefined as void
+    const w = world(on, {
+      isDirty: true,
+      // /gitdiff's open is answered at once; the press's waits, as a desktop slow to answer, or one that never does.
+      open: () => {
+        opens += 1
+
+        return opens === 1
+          ? placed
+          : new Promise<Opened>(resolve => {
+              answer = () => resolve(placed)
+            })
+      },
+    })
+
+    await $.command.run(GITDIFF)
+
+    const band = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: BAND, viewport: { columns: 120, rows: 30 } })
+    const before = w.diffs.length
+
+    await band.press({ key: 'older' })
+
+    // The desktop has not answered, and the pick is made and its diff read all the same.
+    expect(opens).toBe(2)
+    expect(w.diffs.length).toBeGreaterThan(before)
+    expect(await band.find({ key: 'from' })).toMatchObject({ props: { value: sha(4) } })
+    expect(await band.find({ key: 'to' })).toMatchObject({ props: { value: sha(5) } })
+
+    answer()
+  })
+
+  test('a press that fails says why on the strip, instead of doing nothing', async ($, on) => {
+    let isGone = false
+
+    world(on, {
+      isDirty: true,
+      cwd: () => {
+        if (isGone) {
+          throw new Error('the session has no folder')
+        }
+
+        return '/repo'
+      },
+    })
+    await $.command.run(GITDIFF)
+
+    const band = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: BAND, viewport: { columns: 120, rows: 30 } })
+
+    // The folder is gone by the time of the press: reading the diff fails.
+    isGone = true
+    await band.press({ key: 'older' })
+
+    // The engine skips the hook that threw: the press finds no folder at all, and says so in red.
+    expect(await band.find({ type: 'Text', text: 'session.cwd' })).toMatchObject({ props: { color: 'error' } })
+
+    // The next press that works clears it.
+    isGone = false
+    await band.press({ key: 'newer' })
+
+    expect(await band.find({ type: 'Text', text: 'session.cwd' })).toBeUndefined()
+  })
+
   test('terminal: no picture, a slider in text, and the same lists', async ($, on) => {
     world(on, { isDirty: false })
     await $.command.run(GITDIFF)
@@ -227,10 +315,14 @@ describe('the strip above the prompt', () => {
 
     await band.select({ key: 'from', value: sha(2) })
 
-    // A knob at each end of the pick, the track between them drawn heavy, and the days under it.
+    // A knob at each end of the pick, the track between them drawn heavy, and the days under it to press.
     expect(await band.findAll({ type: 'Text', text: '◉' })).toHaveLength(2)
     expect(await band.find({ type: 'Text', text: '━━━━' })).toBeDefined()
-    expect(await band.find({ type: 'Text', text: 'Jan 4' })).toBeDefined()
+    expect(await band.find({ key: 'node:2' })).toMatchObject({ props: { label: 'Jan 4', plain: true } })
+
+    await band.press({ key: 'node:0' })
+
+    expect(await band.find({ key: 'from' })).toMatchObject({ props: { value: sha(0) } })
 
     const pane = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', component: 'Pane', requestId: 'git-diff', props: PANE, viewport: { columns: 84, rows: 30 } })
 

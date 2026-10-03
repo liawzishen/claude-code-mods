@@ -6,6 +6,7 @@ import {
   INITIAL,
   WORKING,
   buttonLabel,
+  clickNode,
   commitRange,
   commitTitle,
   describeFetch,
@@ -78,6 +79,24 @@ describe('what is picked', () => {
   test('a commit is shown against its parent', () => {
     expect(commitRange(4)).toEqual({ from: 3, to: 4 })
     expect(commitRange(0)).toEqual({ from: -1, to: 0 })
+  })
+
+  test('a press on a dot moves the nearer knob there, as a range slider takes a click', () => {
+    const range = { from: 2, to: 6 }
+
+    // Beyond a knob: that knob.
+    expect(clickNode(range, 8)).toEqual({ from: 2, to: 8 })
+    expect(clickNode(range, 0)).toEqual({ from: 0, to: 6 })
+    // Between them: the nearer, and on a tie the newer one.
+    expect(clickNode(range, 3)).toEqual({ from: 3, to: 6 })
+    expect(clickNode(range, 5)).toEqual({ from: 2, to: 5 })
+    expect(clickNode(range, 4)).toEqual({ from: 2, to: 4 })
+    // A knob itself: that commit alone.
+    expect(clickNode(range, 6)).toEqual({ from: 5, to: 6 })
+    expect(clickNode(range, 2)).toEqual({ from: 1, to: 2 })
+    // A single commit grows into a range from the dot pressed.
+    expect(clickNode({ from: 4, to: 5 }, 8)).toEqual({ from: 4, to: 8 })
+    expect(clickNode({ from: 4, to: 5 }, 1)).toEqual({ from: 1, to: 5 })
   })
 
   test('picking To: a single commit stays a single commit; a range keeps its From while that is older', () => {

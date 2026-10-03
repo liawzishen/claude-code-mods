@@ -1,16 +1,17 @@
 import { atom, read, update } from 'claude-code'
-import type { ElementTable, EngineInterface, Register, RenderElement, RenderSurface, Timer } from 'claude-code'
+import type { ElementTable, EngineInterface, Register, RenderElement, RenderSurface, Timer, UiOpenResult } from 'claude-code'
 
 import type { GitDiffCommit, GitDiffFile, GitDiffPatch, GitDiffStat, GitDiffTimeline } from '../types'
 import { branchCard, historyCard } from './card'
 import type { CardNode } from './card'
 import { EMPTY_TREE, LOG_LIMIT, MAX_LOG, fetchAll, fetchHeadPath, loadBranchCompare, loadPatch, loadStat, loadTimeline } from './git'
 import type { Loaded, Run } from './git'
-import { ARROW_W, SLOT_W, formatTime, resolveStart, revealStart, shortDate, trackLabels, visibleCount } from './layout'
+import { ARROW_W, SLOT_W, dayLabels, formatTime, leadOf, resolveStart, revealStart, shortDate, visibleCount } from './layout'
 import {
   INITIAL,
   WORKING,
   buttonLabel,
+  clickNode,
   commitTitle,
   describeFetch,
   describeStat,
@@ -38,6 +39,8 @@ type Actions = {
   refresh: () => void
   details: () => void
   mode: (mode: GitDiffTimeline['mode']) => void
+  /** A press on a dot's label, by the node's id, the track `count` nodes wide: the nearer knob moves there. */
+  pressNode: (id: string, count: number) => void
   /** Pick the newer or the older end of the comparison by its node's id, the track `count` nodes wide. */
   pickTo: (id: string, count: number) => void
   pickFrom: (id: string, count: number) => void
@@ -57,6 +60,8 @@ const PANE_ARGS = { id: PANE, title: 'Git Diff', rows: 24, columns: 96 } as cons
 /** Tools whose calls can change what git sees. */
 const WATCHED = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash'])
 const REFRESH_DELAY_MS = 1200
+/** How long a command or a prompt waits for the surface to say it drew the pane. */
+const OPEN_WAIT_MS = 2000
 /** A fetch may take a while on a slow remote. */
 const FETCH_TIMEOUT_MS = 120_000
 /** Remote branches older than this, in seconds, are shown as stale. */
@@ -261,16 +266,48 @@ const openDetails = async ($: EngineInterface) => {
   }
 }
 
-/** Shows what the person picked: the files view opened by their press, then a fresh read. */
+/**
+ * Opens the files view, and says whether it is drawn; null when the surface has not said within
+ * `ms`. A desktop can draw the pane and be slow to say so, or not say at all: a command or a
+ * prompt waiting on it would never end.
+ */
+const openWithin = ($: EngineInterface, ms: number): Promise<UiOpenResult | null> =>
+  new Promise(resolve => {
+    let timer: Timer | undefined
+
+    try {
+      timer = $.clock.after(ms, () => resolve(null))
+    } catch {
+      // No clock to time it by: the answer alone ends the wait.
+    }
+
+    $.ui.open(PANE_ARGS).then(
+      opened => {
+        timer?.cancel()
+        wasPlaced = opened.isPlaced
+        resolve(opened)
+      },
+      () => {
+        timer?.cancel()
+        resolve(null)
+      },
+    )
+  })
+
+/**
+ * Shows what the person picked: the strip moves at once, the files view opens beside it, and the
+ * diff is read. The open is not waited for: a desktop can be slow to say it drew the pane, or not
+ * say it at all, and the pick must not wait on that.
+ */
 const show = async ($: EngineInterface, change: (t: GitDiffTimeline) => GitDiffTimeline) => {
-  await openDetails($)
   await update($, timeline, t => {
-    const next = change(t)
+    const next = { ...change(t), problem: '' }
 
     return selectionKey(next) === selectionKey(t)
       ? next
       : { ...next, stat: null, statKey: '', statError: '', open: [], patches: [] }
   })
+  void openDetails($)
   await loadSelection($, false)
 }
 
@@ -299,6 +336,13 @@ const repick = async ($: EngineInterface, count: number, pick: (t: GitDiffTimeli
       : { ...t, ...next, isPinned: true, start: revealStart(t.start, next.from, next.to, count, nodeIds(t).length) }
   })
 }
+
+const pressNode = ($: EngineInterface, id: string, count: number) =>
+  repick($, count, t => {
+    const index = indexOfRef(t, id)
+
+    return index === null || index < 0 ? null : clickNode(t, index)
+  })
 
 const pickTo = ($: EngineInterface, id: string, count: number) =>
   repick($, count, t => {
@@ -370,6 +414,7 @@ const viewBranch = async ($: EngineInterface, name: string) => {
     limit: LOG_LIMIT,
     start: -1,
     isPinned: false,
+    problem: '',
     stat: null,
     statKey: '',
     statError: '',
@@ -407,18 +452,28 @@ const fetchRemotes = async ($: EngineInterface) => {
   await update($, timeline, t => ({ ...t, fetch: 'idle' as const, fetchNote: describeFetch(before.branches, after.branches) }))
 }
 
+/** Runs what a press started. One that fails says why on the strip, so a press never does nothing. */
+const attempt = async ($: EngineInterface, work: Promise<unknown>) => {
+  try {
+    await work
+  } catch (error) {
+    await update($, timeline, t => ({ ...t, problem: errorText(error) })).catch(() => undefined)
+  }
+}
+
 const actionsFor = ($: EngineInterface): Actions => ({
-  refresh: () => void refresh($).catch(() => undefined),
+  refresh: () => void attempt($, refresh($)),
   details: () => void openDetails($),
-  mode: mode => void show($, t => ({ ...t, mode })),
-  pickTo: (id, count) => void pickTo($, id, count),
-  pickFrom: (id, count) => void pickFrom($, id, count),
-  shift: (delta, count) => void shift($, delta, count).catch(() => undefined),
-  pickBranch: (side, name) => void pickBranch($, side, name),
-  swap: () => void show($, t => ({ ...t, base: t.compare, compare: t.base })),
-  viewBranch: name => void viewBranch($, name).catch(() => undefined),
-  fetch: () => void fetchRemotes($),
-  toggleFile: path => void toggleFile($, path),
+  mode: mode => void attempt($, show($, t => ({ ...t, mode }))),
+  pressNode: (id, count) => void attempt($, pressNode($, id, count)),
+  pickTo: (id, count) => void attempt($, pickTo($, id, count)),
+  pickFrom: (id, count) => void attempt($, pickFrom($, id, count)),
+  shift: (delta, count) => void attempt($, shift($, delta, count)),
+  pickBranch: (side, name) => void attempt($, pickBranch($, side, name)),
+  swap: () => void attempt($, show($, t => ({ ...t, base: t.compare, compare: t.base }))),
+  viewBranch: name => void attempt($, viewBranch($, name)),
+  fetch: () => void attempt($, fetchRemotes($)),
+  toggleFile: path => void attempt($, toggleFile($, path)),
 })
 
 const isEmptyTree = (sha: string) => sha === EMPTY_TREE.sha1 || sha === EMPTY_TREE.sha256
@@ -557,7 +612,10 @@ const toOptions = (t: GitDiffTimeline) =>
 const fromOptions = (t: GitDiffTimeline) =>
   nearby(-1, t.to - 1, t.from).map(i => ({ value: refOf(t, i), label: optionLabel(t, i) }))
 
-/** A view tab: the open one a plain button, the other quiet. Nothing on the strip is `primary`: no button outranks the rest. */
+/**
+ * A view tab: the open one a plain button, the other quiet. Not `primary`: that marks the newer
+ * end of the comparison under the track, the one thing on the strip that should stand out.
+ */
 const tabLook = (isOpen: boolean) => (isOpen ? { variant: 'secondary' as const } : { plain: true as const, dimColor: true })
 
 /** Whether the comparison reads a remote branch (`origin/main`): only then does the age of this computer's copy matter. */
@@ -604,6 +662,13 @@ const remoteChip = (t: GitDiffTimeline, on: Actions, { Box, Text, Button }: Pick
 const header = (kit: Kit, t: GitDiffTimeline, on: Actions): RenderElement => {
   const { Box, Text, Button, Select } = kit
   const isHistory = t.mode === 'history'
+  // What went wrong with the last press, or with reading its diff; a state kept from an older version has no `problem`.
+  const problem = t.problem || t.statError
+  const warning = problem ? (
+    <Text color={ERROR} wrap="truncate-end">
+      {problem}
+    </Text>
+  ) : null
 
   return (
     <Box flexDirection="row" flexWrap="wrap" columnGap={1} alignItems="center" justifyContent="space-between">
@@ -624,6 +689,7 @@ const header = (kit: Kit, t: GitDiffTimeline, on: Actions): RenderElement => {
           ))}
       </Box>
       <Box flexDirection="row" columnGap={1} alignItems="center" flexWrap="wrap">
+        {warning}
         {remoteChip(t, on, kit)}
         <Button key="details" label="View diff" onPress={on.details} />
         <Button key="refresh" plain label="↻" onPress={on.refresh} />
@@ -652,7 +718,7 @@ const rail = ({ Text }: Kit, isIn: boolean): RenderElement =>
   isIn ? <Text color={ACCENT}>{'━'.repeat(HALF_SLOT)}</Text> : <Text dimColor>{'─'.repeat(HALF_SLOT)}</Text>
 
 /** The terminal's slider: a knob at each end of the pick, the span between them drawn heavy. */
-const trackRow = (kit: Kit, t: GitDiffTimeline, indexes: number[]): RenderElement => {
+const trackRow = (kit: Kit, t: GitDiffTimeline, columns: number, indexes: number[]): RenderElement => {
   const { Box, Text } = kit
   const newest = nodeIds(t).length - 1
   // Whether the stretch of track from node `a` to the next one is inside the pick.
@@ -660,7 +726,7 @@ const trackRow = (kit: Kit, t: GitDiffTimeline, indexes: number[]): RenderElemen
 
   return (
     <Box flexDirection="row">
-      <Box width={ARROW_W} />
+      <Box width={leadOf(indexes.length, columns)} />
       {indexes.map(i => {
         const role = roleOf(t, i)
         const isPicked = role === 'base' || role === 'compare'
@@ -680,30 +746,10 @@ const trackRow = (kit: Kit, t: GitDiffTimeline, indexes: number[]): RenderElemen
   )
 }
 
-/** The terminal's labels under its slider, one per slot: as sparse as the card's. */
-const labelRow = ({ Box, Text }: Kit, t: GitDiffTimeline, indexes: number[], labels: string[]): RenderElement => (
-  <Box flexDirection="row">
-    <Box width={ARROW_W} />
-    {indexes.map((i, k) => (
-      <Box width={SLOT_W} justifyContent="center">
-        {(labels[k] ?? '') !== '' && (
-          <Text {...(i === t.from || i === t.to ? { color: ACCENT, bold: true } : { dimColor: true })} wrap="truncate-end">
-            {labels[k] ?? ''}
-          </Text>
-        )}
-      </Box>
-    ))}
-  </Box>
-)
-
 /** History's picture: the card on the desktop; on the terminal the pick and totals in a line, over a slider in text. */
 const historyView = (kit: Kit, t: GitDiffTimeline, columns: number, win: ReturnType<typeof windowOf>): RenderElement => {
   const { Box, Text, Svg } = kit
   const { total, start, indexes } = win
-  const labels = trackLabels(
-    indexes.map(i => t.commits[i]?.time ?? null),
-    indexes.map(i => i === t.from || i === t.to),
-  )
   const range = { from: nodeTag(t, t.from), to: nodeTag(t, t.to) }
   const title = `${t.viewing === '' ? t.branch : t.viewing} · ${t.commits.length}${t.hasMore ? '+' : ''} commit${t.commits.length === 1 ? '' : 's'}`
 
@@ -715,17 +761,15 @@ const historyView = (kit: Kit, t: GitDiffTimeline, columns: number, win: ReturnT
           <Text dimColor>·</Text>
           {totals(kit, t)}
         </Box>
-        {trackRow(kit, t, indexes)}
-        {labelRow(kit, t, indexes, labels)}
+        {trackRow(kit, t, columns, indexes)}
       </Box>
     )
   }
 
-  const nodes: CardNode[] = indexes.map((i, k) => {
+  const nodes: CardNode[] = indexes.map(i => {
     const commit = t.commits[i]
 
     return {
-      label: labels[k] ?? '',
       role: roleOf(t, i),
       isWorking: commit === undefined,
       tip: commit === undefined ? 'Uncommitted changes' : `${commit.short} · ${commitTitle(commit)} · +${commit.added} −${commit.deleted}`,
@@ -748,41 +792,54 @@ const historyView = (kit: Kit, t: GitDiffTimeline, columns: number, win: ReturnT
   )
 }
 
-/** Cells a Select takes beyond its label and value: the gap, the frame and the arrow. */
-const SELECT_CHROME = 5
-/** Cells the Older and Newer buttons take, with their gaps. */
-const STEP_W = 22
-
 /**
- * History's controls, under the card the way its track runs: older on the left, newer on the
- * right, and between them the two ends of the comparison by name. One row where it fits; on a
- * narrow band the two buttons keep a row of their own, under the track's ends. The phone has no lists.
+ * The track's handles, right under it: each dot's label, its day or time, is a button under that
+ * dot, and ‹ and › sit under the track's ends, as in the mockup. The desktop draws the card as a
+ * picture, which takes no clicks: these are the timeline's to press. A press on a label moves the
+ * nearer knob there, as a range slider takes a click; on a knob's own label, that commit alone.
+ * ‹ and › move the whole comparison one commit.
  */
-const historyPickers = (
-  { Box, Text, Button, Select }: Kit,
-  t: GitDiffTimeline,
-  on: Actions,
-  columns: number,
-  count: number,
-): RenderElement => {
-  const canOlder = t.from > -1 || canLoadOlder(t)
-  const canNewer = t.to < nodeIds(t).length - 1
-  const older = <Button key="older" label="‹ Older" dimColor={!canOlder} onPress={() => on.shift(-1, count)} />
-  const newer = <Button key="newer" label="Newer ›" dimColor={!canNewer} onPress={() => on.shift(1, count)} />
+const handleRow = ({ Box, Button, Svg }: Kit, t: GitDiffTimeline, columns: number, on: Actions, win: ReturnType<typeof windowOf>): RenderElement => {
+  const { total, count, indexes } = win
+  const ids = nodeIds(t)
+  const labels = dayLabels(indexes.map(i => t.commits[i]?.time ?? null))
+  const gap = leadOf(indexes.length, columns) - ARROW_W
+  // The terminal draws a `primary` Button as `[ label ]`, wider than a slot: its knobs are marked on the slider above.
+  const lookOf = (i: number) => {
+    const role = roleOf(t, i)
 
-  if (Select === null) {
-    return (
-      <Box flexDirection="row" columnGap={1} alignItems="center" justifyContent="space-between">
-        {older}
-        <Text>{`${nodeTag(t, t.from)} → ${nodeTag(t, t.to)}`}</Text>
-        {newer}
-      </Box>
-    )
+    return Svg !== null && role === 'compare'
+      ? { variant: 'primary' as const }
+      : Svg !== null && role === 'base'
+        ? { variant: 'secondary' as const }
+        : { plain: true as const, dimColor: role === 'outside' }
   }
 
-  const from = optionLabel(t, t.from)
-  const to = optionLabel(t, t.to)
-  const ends = (
+  return (
+    <Box flexDirection="row" alignItems="center">
+      <Box width={ARROW_W}>
+        <Button key="older" plain label="‹" dimColor={t.from <= -1 && !canLoadOlder(t)} onPress={() => on.shift(-1, count)} />
+      </Box>
+      {gap > 0 && <Box width={gap} />}
+      {indexes.map((i, k) => (
+        <Box width={SLOT_W} justifyContent="center">
+          <Button key={`node:${i}`} label={labels[k] ?? ''} {...lookOf(i)} onPress={() => on.pressNode(ids[i] ?? '', count)} />
+        </Box>
+      ))}
+      <Box flexGrow={1} />
+      <Box width={ARROW_W} justifyContent="flex-end">
+        <Button key="newer" plain label="›" dimColor={t.to >= total - 1} onPress={() => on.shift(1, count)} />
+      </Box>
+    </Box>
+  )
+}
+
+/**
+ * History's lists, under the handles: the two ends of the comparison by commit message and day,
+ * to pick one the track does not show. The phone has no lists: its handles do it all.
+ */
+const historyPickers = ({ Box, Text, Select }: Kit, t: GitDiffTimeline, on: Actions, count: number): RenderElement | null =>
+  Select === null ? null : (
     <Box flexDirection="row" columnGap={1} alignItems="center" flexWrap="wrap" justifyContent="center">
       <Select key="from" label="From" options={fromOptions(t)} value={refOf(t, t.from)} onSelect={id => on.pickFrom(id, count)} />
       <Box flexDirection="row" columnGap={1} alignItems="center">
@@ -791,23 +848,6 @@ const historyPickers = (
       </Box>
     </Box>
   )
-
-  return 'From To →'.length + from.length + to.length + 2 * SELECT_CHROME + STEP_W <= columns ? (
-    <Box flexDirection="row" flexWrap="wrap" columnGap={1} alignItems="center" justifyContent="space-between">
-      {older}
-      {ends}
-      {newer}
-    </Box>
-  ) : (
-    <Box flexDirection="column">
-      <Box flexDirection="row" justifyContent="space-between">
-        {older}
-        {newer}
-      </Box>
-      {ends}
-    </Box>
-  )
-}
 
 /** Branches: the fork card, or a line of words on the terminal. */
 const branchView = (kit: Kit, t: GitDiffTimeline, columns: number): RenderElement => {
@@ -872,17 +912,23 @@ const branchPickers = ({ Box, Text, Button, Select }: Kit, t: GitDiffTimeline, o
   )
 }
 
-/** The strip: a row of what to show, the card, and under it a row to pick with. */
+/** The strip: a row of what to show, the card with its handles right under it, then the lists. */
 const strip = (kit: Kit, t: GitDiffTimeline, columns: number, on: Actions): RenderElement => {
   const { Box } = kit
   const win = windowOf(t, columns)
-  const isHistory = t.mode === 'history'
 
-  return (
+  return t.mode === 'history' ? (
     <Box flexDirection="column">
       {header(kit, t, on)}
-      {isHistory ? historyView(kit, t, columns, win) : branchView(kit, t, columns)}
-      {isHistory ? historyPickers(kit, t, on, columns, win.count) : branchPickers(kit, t, on)}
+      {historyView(kit, t, columns, win)}
+      {handleRow(kit, t, columns, on, win)}
+      {historyPickers(kit, t, on, win.count)}
+    </Box>
+  ) : (
+    <Box flexDirection="column">
+      {header(kit, t, on)}
+      {branchView(kit, t, columns)}
+      {branchPickers(kit, t, on)}
     </Box>
   )
 }
@@ -1136,7 +1182,7 @@ const offerOnce = async ($: EngineInterface) => {
     hasOffered = true
 
     if (!wasPlaced && status !== 'no-repo' && status !== 'error') {
-      wasPlaced = (await $.ui.open(PANE_ARGS)).isPlaced
+      await openWithin($, OPEN_WAIT_MS)
     }
   } catch {
     // The pane stays as it was; /gitdiff opens it by hand.
@@ -1156,11 +1202,16 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'gitdiff' }, async $ => {
     await refresh($).catch(() => undefined)
 
-    const opened = await $.ui.open(PANE_ARGS)
+    const opened = await openWithin($, OPEN_WAIT_MS)
 
-    wasPlaced = opened.isPlaced
-
-    return { text: opened.isPlaced ? 'Git Diff pane opened.' : `Git Diff pane is waiting: ${opened.reason}` }
+    return {
+      text:
+        opened === null
+          ? 'Opening the Git Diff pane.'
+          : opened.isPlaced
+            ? 'Git Diff pane opened.'
+            : `Git Diff pane is waiting: ${opened.reason}`,
+    }
   })
 
   on('prompt.submit', async ($, e, next) => {

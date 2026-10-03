@@ -1,7 +1,7 @@
 {
   "name": "git-diff-timeline",
-  "version": "0.7.0",
-  "description": "Git Diff timeline above the prompt: a clean range slider over any branch's history, read without switching to it. Pick From and To by commit message, or step Older and Newer one commit at a time; says how long ago the remote branches were fetched, with a Fetch button; a Branches tab compares two branches; a GitHub-style files view shows each file's diff. Works with any git remote.",
+  "version": "0.8.0",
+  "description": "Git Diff timeline above the prompt: a clean range slider over any branch's history, read without switching to it. Press the date under a dot to move the nearer knob there, step ‹ › one commit at a time, or pick From and To by commit message; says how long ago the remote branches were fetched, with a Fetch button; a Branches tab compares two branches; a GitHub-style files view shows each file's diff. Works with any git remote.",
   "types": "./types/index.d.ts",
   "userConfig": {
     "position": {

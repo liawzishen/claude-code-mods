@@ -30,6 +30,7 @@ export const INITIAL: GitDiffTimeline = {
   isStale: false,
   fetch: 'idle',
   fetchNote: '',
+  problem: '',
   base: '',
   compare: '',
   branchCompare: null,
@@ -77,6 +78,22 @@ export const commitRange = (index: number): Range => ({ from: index - 1, to: ind
  */
 export const withTo = ({ from, to }: Range, index: number): Range =>
   from === to - 1 || from >= index ? commitRange(index) : { from, to: index }
+
+/**
+ * A press on a dot of the track, as a range slider takes a click: the nearer knob moves to it (a
+ * dot beyond a knob, that knob; a tie, the newer one). A press on a knob shows that commit alone.
+ */
+export const clickNode = ({ from, to }: Range, index: number): Range => {
+  if (index === to || index === from) {
+    return commitRange(index)
+  }
+
+  if (index > to) {
+    return { from, to: index }
+  }
+
+  return index < from || index - from < to - index ? { from: index, to } : { from, to: index }
+}
 
 /** A new older end, picked from the From list: it must stay older than the newer end. */
 export const withFrom = ({ from, to }: Range, index: number): Range =>
@@ -227,6 +244,8 @@ export const merge = (prev: GitDiffTimeline, loaded: Loaded, cwd: string): GitDi
     isStale: kept.isStale,
     fetch: kept.fetch,
     fetchNote: kept.fetchNote,
+    // A state kept from an older version has no `problem`.
+    problem: kept.problem || '',
   }
 
   if (loaded.status !== 'ready') {

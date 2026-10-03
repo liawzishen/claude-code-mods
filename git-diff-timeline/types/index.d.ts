@@ -96,6 +96,8 @@ export type GitDiffTimeline = {
   fetch: 'idle' | 'running' | 'failed'
   /** What the last Fetch changed, or why it failed. */
   fetchNote: string
+  /** Why the person's last press failed, for the strip to say; '' when it did not. */
+  problem: string
   base: string
   compare: string
   branchCompare: GitDiffBranchCompare | null

@@ -8,19 +8,14 @@ import {
   dayLabels,
   formatDate,
   formatTime,
+  leadOf,
   resolveStart,
   revealStart,
   slotCenter,
-  trackLabels,
   visibleCount,
 } from '../hooks/layout'
 
-const node = (label: string, role: CardNode['role']): CardNode => ({
-  label,
-  role,
-  isWorking: false,
-  tip: `${label} tip`,
-})
+const node = (tip: string, role: CardNode['role']): CardNode => ({ role, isWorking: false, tip })
 
 const attr = (svg: string, name: string) => [...svg.matchAll(new RegExp(`${name}="([^"]*)"`, 'g'))].map(m => m[1])
 
@@ -31,9 +26,14 @@ describe('layout', () => {
     expect(visibleCount(200, 3)).toBe(3)
   })
 
-  test('a slot centre sits past the track’s left end', () => {
-    expect(slotCenter(0)).toBe(ARROW_W + SLOT_W / 2)
-    expect(slotCenter(2)).toBe(ARROW_W + 2 * SLOT_W + SLOT_W / 2)
+  test('slots start past the track’s left end, and a short history sits in the middle of the room', () => {
+    // 96 columns: room for 10 slots between the ends.
+    expect(leadOf(10, 96)).toBe(ARROW_W)
+    expect(slotCenter(0, 10, 96)).toBe(ARROW_W + SLOT_W / 2)
+    expect(slotCenter(2, 10, 96)).toBe(ARROW_W + 2 * SLOT_W + SLOT_W / 2)
+    // Four commits: three slots of room on each side.
+    expect(leadOf(4, 96)).toBe(ARROW_W + 3 * SLOT_W)
+    expect(slotCenter(3, 4, 96) + slotCenter(0, 4, 96)).toBe(96)
   })
 
   test('the window follows the newest unless moved', () => {
@@ -69,13 +69,6 @@ describe('layout', () => {
     ])
   })
 
-  test('the track is labelled sparsely: each day where it starts, the two picked dots, and Now', () => {
-    const at = (day: number, h: number) => Math.floor(new Date(2026, 6, day, h, 0).getTime() / 1000)
-    const times = [at(3, 9), at(3, 11), at(3, 15), at(4, 9), at(4, 10), null]
-
-    expect(trackLabels(times, [false, false, true, false, false, false])).toEqual(['Jul 3', '', '3:00 PM', 'Jul 4', '', 'Now'])
-  })
-
   test('dates and times', () => {
     const seconds = (h: number, m: number) => Math.floor(new Date(2026, 3, 3, h, m).getTime() / 1000)
 
@@ -91,22 +84,13 @@ describe('the history card', () => {
   const range = { from: 'a3e3a24', to: 'b5d4801' }
   const svg = historyCard({ columns: 95, nodes, title: 'main · 3 commits', range, stats, older: 2, newer: 0 })
 
-  test('is one svg as wide as the band, its dots spread evenly along the track', () => {
+  test('is one svg as wide as the band, each dot over its slot: where its label sits under the card', () => {
     const centres = [...svg.matchAll(/data-node="(\d+)" cx="([\d.]+)"/g)].map(m => Number(m[2]))
-    const width = 95 * CELL
 
     expect(svg.startsWith('<svg')).toBe(true)
     expect(svg.endsWith('</svg>')).toBe(true)
-    expect(attr(svg, 'viewBox')[0]).toBe(`0 0 ${width} ${HEIGHT}`)
-    expect(centres).toHaveLength(3)
-    expect(Math.abs(centres[0]! + centres[2]! - width)).toBeLessThan(0.2)
-    expect(Math.abs(centres[1]! - width / 2)).toBeLessThan(0.2)
-    // As many dots as fit stand a slot apart, at the slot centres.
-    const full = historyCard({ columns: 95, nodes: Array.from({ length: 9 }, () => node('', 'outside')), title: 'main', range, stats, older: 0, newer: 0 })
-    const xs = [...full.matchAll(/data-node="(\d+)" cx="([\d.]+)"/g)].map(m => Number(m[2]))
-
-    expect(xs[1]! - xs[0]!).toBeGreaterThanOrEqual(SLOT_W * CELL - 0.2)
-    expect(xs[0]).toBeGreaterThanOrEqual(slotCenter(0) * CELL - 0.2)
+    expect(attr(svg, 'viewBox')[0]).toBe(`0 0 ${95 * CELL} ${HEIGHT}`)
+    expect(centres).toEqual(nodes.map((_, i) => slotCenter(i, 3, 95) * CELL))
   })
 
   test('marks the compared pair, and says what is beyond the window, and nothing else in the corners', () => {
@@ -136,19 +120,10 @@ describe('the history card', () => {
     expect(svg).toMatch(/class="f-ink" fill="#[0-9a-f]{6}"/)
   })
 
-  test('draws a label only where one is given, and no bars over the track', () => {
-    const sparse = historyCard({
-      columns: 95,
-      nodes: [node('Jul 1', 'outside'), node('', 'outside'), node('', 'base'), node('Now', 'compare')],
-      title: 'main',
-      range,
-      stats,
-      older: 0,
-      newer: 0,
-    })
-
-    expect([...sparse.matchAll(/<text[^>]*text-anchor="middle"[^>]*>([^<]*)<\/text>/g)].map(m => m[1])).toEqual(['Jul 1', 'Now'])
-    expect(sparse).not.toContain('data-bar')
+  test('draws no words under the dots, and no bars over the track: the labels under the card are the buttons', () => {
+    // The pill's text (its words in tspans) and the corner's: nothing at the dots.
+    expect([...svg.matchAll(/<text[^>]*>([^<]*)/g)].map(m => m[1])).toEqual(['', '2 older'])
+    expect(svg).not.toContain('data-bar')
   })
 
   test('a pick that starts out of view runs from the track’s start', () => {
@@ -163,7 +138,8 @@ describe('the history card', () => {
     })
     const x = /data-span="pick" x="([\d.]+)"/.exec(pick)?.[1]
 
-    expect(Number(x)).toBeLessThan(slotCenter(0) * CELL)
+    expect(Number(x)).toBeLessThan(slotCenter(0, 2, 95) * CELL)
+    expect(Number(x)).toBeLessThan(ARROW_W * CELL)
   })
 
   test('says how many commits are beyond the window on each side', () => {

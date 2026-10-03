@@ -1,18 +1,20 @@
-import { ARROW_W } from './layout'
+import { slotCenter } from './layout'
 
 /**
  * The cards the desktop draws as one Svg each. Minimal, with a few physical cues lit from
  * above: a raised card, the commits on a recessed track, the compared span a lit bar in
  * that track with a raised knob at each end, and a summary pill on top. The colours are
  * the app's own; the card is light, and dark where the app is (a media query inside the
- * Svg). Units are tenths of a cell. The card is a picture: the controls under it pick.
+ * Svg). Units are tenths of a cell, so a dot drawn at its slot's centre sits right over
+ * the label under the card that picks it: the desktop draws an Svg as a picture, which
+ * takes no clicks.
  */
 
 /** viewBox units per cell: a card is `columns * CELL` wide. */
 export const CELL = 10
 
 /** viewBox units down: the history card, and the taller branch card with its fork. */
-export const HEIGHT = 124
+export const HEIGHT = 100
 export const BRANCH_HEIGHT = 156
 
 const PILL_Y = 28
@@ -23,9 +25,8 @@ const SIDE_SIZE = 14
 const LABEL_SIZE = 15
 /** Track ends, from the card's sides. */
 const EDGE = 20
-/** The history card's track and the labels under it. */
-const TRACK_Y = 76
-const LABEL_Y = 106
+/** The history card's track, near its bottom: the dots' labels come right under the card. */
+const TRACK_Y = 74
 const TRACK_H = 12
 const SPAN_H = 8
 const KNOB_R = 10
@@ -87,8 +88,6 @@ const DARK_RULES = (Object.keys(DARK) as Tone[])
   .join('')
 
 export type CardNode = {
-  /** Under the knob or dot: `Jul 4`, `Now`; '' for none. */
-  label: string
   role: 'outside' | 'base' | 'between' | 'compare'
   isWorking: boolean
   /** What the dot is, for a reader that hovers or cannot see it. */
@@ -100,7 +99,7 @@ export type CardStats = { files: string; added: string; deleted: string } | null
 export type HistoryCardInput = {
   /** The band's width in cells: the card spans it. */
   columns: number
-  /** The commits in view, oldest first, spread evenly along the track. */
+  /** The commits in view, oldest first, one per slot: a short history in the middle of the track. */
   nodes: CardNode[]
   /** What the card shows, for a reader that cannot see it: `main · 16 commits`. */
   title: string
@@ -242,23 +241,16 @@ const corner = (text: string, x: number, room: number, anchor: 'start' | 'end') 
     ? ''
     : `<text x="${r(x)}" y="${PILL_Y + 5}" font-size="${SIDE_SIZE}" text-anchor="${anchor}"${fillOf('muted')}>${esc(text)}</text>`
 
-/** Where node `i` of `count` sits: spread evenly along the track, a short history as wide as a long one. */
-const spot = (i: number, count: number, width: number) => {
-  const pad = ARROW_W * CELL
-
-  return pad + ((i + 0.5) * (width - 2 * pad)) / Math.max(1, count)
-}
-
 /**
  * History: a range slider over the commits in view, as the mockup has it. The pick is the lit
- * span between two knobs, summed up in the pill on top; the track is labelled sparsely, each
- * day where it starts and the two knobs.
+ * span between two knobs, summed up in the pill on top. The dots carry no words: their labels,
+ * under the card, are what the person presses.
  */
 export const historyCard = ({ columns, nodes, title, range, stats, older, newer }: HistoryCardInput): string => {
   const width = columns * CELL
   const left = EDGE
   const right = width - EDGE
-  const xs = nodes.map((_, i) => spot(i, nodes.length, width))
+  const xs = nodes.map((_, i) => slotCenter(i, nodes.length, columns) * CELL)
   const picked = nodes.map((node, i) => (node.role === 'outside' ? -1 : i)).filter(i => i >= 0)
   const firstPicked = picked[0]
   const lastPicked = picked.at(-1)
@@ -296,16 +288,7 @@ export const historyCard = ({ columns, nodes, title, range, stats, older, newer 
   }
 
   nodes.forEach((node, i) => {
-    const x = xs[i]!
-    const isPicked = node.role === 'base' || node.role === 'compare'
-
-    parts.push(`<g><title>${esc(node.tip)}</title>${nodeMark(node, i, x)}</g>`)
-
-    if (node.label !== '') {
-      parts.push(
-        `<text x="${r(x)}" y="${LABEL_Y}" font-size="${LABEL_SIZE}" text-anchor="middle"${fillOf(isPicked ? 'ink' : 'muted')}${isPicked ? ' font-weight="600"' : ''}>${esc(node.label)}</text>`,
-      )
-    }
+    parts.push(`<g><title>${esc(node.tip)}</title>${nodeMark(node, i, xs[i]!)}</g>`)
   })
 
   parts.push('</svg>')

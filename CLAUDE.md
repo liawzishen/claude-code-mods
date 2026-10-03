@@ -23,9 +23,9 @@ Each top-level folder is one Claude Code mod: a plugin whose hooks module export
 ## The look
 
 - Minimal first. Physical cues only where they help a control read as one: a recessed track, raised knobs, one light from above. No glows.
-- Say each thing once. The card shows the comparison; the row under it picks it (Older, From, To, Newer). Nothing in an `Svg` is a control.
+- Say each thing once. The card shows the comparison; the dates right under its dots, and ‹ › under the track's ends, are its handles; From and To pick by name. Nothing in an `Svg` is a control.
 - Fit the band in a few rows: a header, the card, one row of controls. Show a control only where it applies (`Fetch` only while a remote branch is in view).
-- A desktop draws every `Button` as its native button, `plain` too (the engine's own docs): a row of ten reads as a toolbar. One `Select` beats a row of buttons.
+- A desktop draws every `Button` as its native button, `plain` too (the engine's own docs): a row of ten reads as a toolbar. Draw a row of buttons only where it is the control, as the dates under the track's dots are, and give it the labels people read (a day, not a sha).
 - One accent, Claude's own: the `claude` theme key on `Text`, `#d77757` in an `Svg`. Green and red only for lines added and removed.
 - `Text` colours are theme keys (`claude`, `success`, `error`), not hex, so they follow the person's theme, the colour-blind ones included.
 - An `Svg` card is light, and dark under `@media (prefers-color-scheme: dark)`: light colours as attributes, a class per role that the dark rules restyle (`git-diff-timeline/hooks/card.ts`).
@@ -41,6 +41,7 @@ Each top-level folder is one Claude Code mod: a plugin whose hooks module export
 - An `Svg` is drawn as an image and shows in the band above the prompt. Clicks on it go nowhere.
 - A `Client` region gets no mouse events on desktop. Make things clickable with `Button` or `Select`.
 - A pane opened from a person's press or command shows in the right side panel.
+- A press that awaited `$.ui.open` before changing the state did nothing there, while one that only changed the state worked (reported by the person, 2026-10-03). Change the state first, then open the pane without waiting on it; a command or prompt that must hear back waits a moment at most (`openWithin`).
 
 ## Before you commit
 
