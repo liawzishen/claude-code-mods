@@ -4,7 +4,8 @@ A Claude Code mod that puts a Git Diff timeline above the prompt.
 
 - **History:** a range slider over the branch's commits (first parent, so a merged pull request is one commit). A pill on top sums up the comparison. The desktop app draws the card as a picture, which takes no clicks, so the slider's handles sit right under it:
   - **The date under each dot** is a button. Press one and the nearer knob moves there, as on a range slider. Press a knob's own date to see that commit alone.
-  - **‹** and **›**, under the track's ends, move the whole comparison one commit older or newer, and the track follows it. Past the oldest commit loaded, ‹ reads 60 more, up to 600.
+  - **The mouse wheel or trackpad**, anywhere over the strip, scrolls the timeline: the comparison moves a commit a tick (up for older, down for newer) and the track slides under it, so you can watch the changes go by. The diff is read once the wheel rests.
+  - **‹** and **›**, under the track's ends, move the whole comparison one commit older or newer, and the track follows it. Past the oldest commit loaded, ‹ (or the wheel) reads 60 more, up to 600.
   - **From** and **To** list the commits by message and day, merges by their pull or merge request title, to pick one the track does not show.
   - **Branch** shows the history of any local or remote branch. It is read in place: nothing is checked out and your files do not change.
   - A press changes the strip at once; the files view opens beside it without holding the strip up. If a press fails, the strip says why in red.

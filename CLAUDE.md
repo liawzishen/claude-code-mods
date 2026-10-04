@@ -18,6 +18,8 @@ Each top-level folder is one Claude Code mod: a plugin whose hooks module export
 - A `Select` takes 1 to 64 options. More, and the engine refuses the whole tree and draws its own, so the band vanishes: cut a long list (git-diff-timeline lists the 64 commits around the pick).
 - A render hook never writes state. Write from a handler (`onPress`, `onSelect`) or another event with `update($, atom, fn)` from `claude-code`.
 - A render hook reads state and draws, nothing more: no `$.clock` or other engine call. One that throws is skipped and the band goes blank (a test without `mock.clock` has no `clock.now`). Work out times when the data is read, and keep them in state.
+- The wheel over the band raises `ui.scroll` (`by`: ticks, negative toward the top), even when the band has nothing to scroll. Answer it with `{}` and move your own content; pass it on with `next(e)` while the band is taller than its window (`contentRows > bodyRows`), or the person cannot reach the rest. A test raises it with `$.ui.scroll({ component, requestId, offset, by, bodyRows, contentRows, origin })`.
+- No event says where a click on an `Svg` landed: `ui.focus` carries no position. A picture's clicks are lost; put Buttons under it, in slots that line up with what it draws.
 - Test files cannot import `node:*`. Mock git with a beneath hook: `on('process.run', (_$, e) => ({ value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false } }))`.
 
 ## The look
@@ -25,7 +27,7 @@ Each top-level folder is one Claude Code mod: a plugin whose hooks module export
 - Minimal first. Physical cues only where they help a control read as one: a recessed track, raised knobs, one light from above. No glows.
 - Say each thing once. The card shows the comparison; the dates right under its dots, and ‹ › under the track's ends, are its handles; From and To pick by name. Nothing in an `Svg` is a control.
 - Fit the band in a few rows: a header, the card, one row of controls. Show a control only where it applies (`Fetch` only while a remote branch is in view).
-- A desktop draws every `Button` as its native button, `plain` too (the engine's own docs): a row of ten reads as a toolbar. Draw a row of buttons only where it is the control, as the dates under the track's dots are, and give it the labels people read (a day, not a sha).
+- On the desktop a `plain` Button draws as plain text, a `secondary` one outlined, a `primary` one filled (seen 2026-10-04). A row of plain buttons reads as labels, so give it the words people read (a day, not a sha).
 - One accent, Claude's own: the `claude` theme key on `Text`, `#d77757` in an `Svg`. Green and red only for lines added and removed.
 - `Text` colours are theme keys (`claude`, `success`, `error`), not hex, so they follow the person's theme, the colour-blind ones included.
 - An `Svg` card is light, and dark under `@media (prefers-color-scheme: dark)`: light colours as attributes, a class per role that the dark rules restyle (`git-diff-timeline/hooks/card.ts`).
@@ -39,6 +41,7 @@ Each top-level folder is one Claude Code mod: a plugin whose hooks module export
 ## What the desktop app does (tested 2026-10-03, engine 2.1.286)
 
 - An `Svg` is drawn as an image and shows in the band above the prompt. Clicks on it go nowhere.
+- Box widths in cells line up with an `Svg` as wide as the band: the dates under the track sat within a pixel of their dots (2026-10-04).
 - A `Client` region gets no mouse events on desktop. Make things clickable with `Button` or `Select`.
 - A pane opened from a person's press or command shows in the right side panel.
 - A press that awaited `$.ui.open` before changing the state did nothing there, while one that only changed the state worked (reported by the person, 2026-10-03). Change the state first, then open the pane without waiting on it; a command or prompt that must hear back waits a moment at most (`openWithin`).

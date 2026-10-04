@@ -6,7 +6,7 @@ import { branchCard, historyCard } from './card'
 import type { CardNode } from './card'
 import { EMPTY_TREE, LOG_LIMIT, MAX_LOG, fetchAll, fetchHeadPath, loadBranchCompare, loadPatch, loadStat, loadTimeline } from './git'
 import type { Loaded, Run } from './git'
-import { ARROW_W, SLOT_W, dayLabels, formatTime, leadOf, resolveStart, revealStart, shortDate, visibleCount } from './layout'
+import { ARROW_W, SLOT_W, centreStart, dayLabels, formatTime, leadOf, resolveStart, revealStart, shortDate, visibleCount } from './layout'
 import {
   INITIAL,
   WORKING,
@@ -62,6 +62,10 @@ const WATCHED = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash'])
 const REFRESH_DELAY_MS = 1200
 /** How long a command or a prompt waits for the surface to say it drew the pane. */
 const OPEN_WAIT_MS = 2000
+/** Commits one turn of the wheel moves the comparison at most, however fast it spins. */
+const MAX_GLIDE = 3
+/** How long the wheel rests before the diff it landed on is read. */
+const GLIDE_REST_MS = 200
 /** A fetch may take a while on a slow remote. */
 const FETCH_TIMEOUT_MS = 120_000
 /** Remote branches older than this, in seconds, are shown as stale. */
@@ -393,6 +397,62 @@ const loadOlder = async ($: EngineInterface) => {
   } finally {
     isLoadingOlder = false
   }
+}
+
+/** How many commits the band's track showed when last drawn: the wheel centres the pick in that many. */
+let bandCount = 0
+let glideTimer: Timer | undefined
+
+/** Reads the diff the wheel landed on, once it rests: a spin across ten commits reads one diff, not ten. */
+const readWhenStill = ($: EngineInterface) => {
+  glideTimer?.cancel()
+
+  try {
+    glideTimer = $.clock.after(GLIDE_REST_MS, () => {
+      glideTimer = undefined
+      void loadSelection($, false).catch(() => undefined)
+    })
+  } catch {
+    // No clock to wait by: read it now.
+    void loadSelection($, false).catch(() => undefined)
+  }
+}
+
+/**
+ * The wheel over the strip: the comparison moves a commit a tick, older toward the top and newer
+ * toward the bottom, and the track scrolls under it, the pick in the middle. The strip follows at
+ * once; the diff is read when the wheel rests, and the pane is left as it is.
+ */
+const glide = async ($: EngineInterface, by: number) => {
+  const step = Math.sign(by) * Math.min(Math.abs(by), MAX_GLIDE)
+  const t = await read($, timeline)
+
+  if (step < 0 && t.from + step < -1 && canLoadOlder(t)) {
+    await loadOlder($)
+  }
+
+  await update($, timeline, cur => {
+    const total = nodeIds(cur).length
+    // As far as the history loaded goes: the commit before the oldest, the newest node.
+    const delta = Math.max(-1 - cur.from, Math.min(total - 1 - cur.to, step))
+    const from = cur.from + delta
+    const to = cur.to + delta
+    const next = {
+      ...cur,
+      from,
+      to,
+      isPinned: true,
+      problem: '',
+      start: bandCount > 0 ? centreStart(from, to, bandCount, total) : cur.start,
+    }
+
+    return delta === 0
+      ? cur
+      : selectionKey(next) === selectionKey(cur)
+        ? next
+        : { ...next, stat: null, statKey: '', statError: '', open: [], patches: [] }
+  })
+  readWhenStill($)
 }
 
 /** One commit older or newer. Past the oldest commit loaded, it reads older ones first. */
@@ -1238,6 +1298,26 @@ export const register: Register = (on, options) => {
     return ran
   })
 
+  // The wheel over the strip scrolls the timeline. The desktop draws the card as a picture, which
+  // takes no clicks, but the band hears the wheel over all of it, the picture included.
+  on('ui.scroll', { component: 'AbovePrompt' }, async ($, e, next) => {
+    // A strip taller than the band scrolls as the engine scrolls it, or the person could not reach its end.
+    if (position !== 'band' || e.origin.kind !== 'person' || e.by === 0 || e.contentRows > e.bodyRows) {
+      return next(e)
+    }
+
+    const t = await read($, timeline)
+
+    if (t.status !== 'ready' || t.mode !== 'history') {
+      return next(e)
+    }
+
+    await attempt($, glide($, e.by))
+
+    // Answered: the band's own window stays put, and the strip redraws from the state.
+    return {}
+  })
+
   // The strip above the prompt: drawn in a repository, left alone elsewhere.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (position !== 'band' || e.props.hasSurvey) {
@@ -1252,6 +1332,9 @@ export const register: Register = (on, options) => {
 
     const kit = kitOf($.ui.resolve(e), e.surface)
     const { Text } = kit
+
+    // Not state: the wheel's hook reads it to size the window it centres the pick in.
+    bandCount = visibleCount(e.props.bodyColumns, nodeIds(t).length)
 
     return t.status === 'ready' ? (
       strip(kit, t, e.props.bodyColumns, actionsFor($))

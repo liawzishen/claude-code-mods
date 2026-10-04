@@ -77,6 +77,17 @@ export const resolveStart = (start: number, count: number, total: number): numbe
   start < 0 ? Math.max(0, total - count) : clampStart(start, count, total)
 
 /**
+ * The window centred on the pick `from`..`to`, or on its newer end when the pick is wider than the
+ * window: the track scrolling under the pick as the wheel moves it. `-1` once that is the newest window.
+ */
+export const centreStart = (from: number, to: number, count: number, total: number): number => {
+  const older = Math.max(0, from)
+  const clamped = clampStart(to - older + 1 > count ? to - count + 1 : Math.round((older + to + 1 - count) / 2), count, total)
+
+  return clamped === Math.max(0, total - count) ? -1 : clamped
+}
+
+/**
  * The window that shows the pick `from`..`to`: where it was while both ends are in view, else
  * centred on the pick, or on its newer end when the pick is wider than the window. `-1` once
  * that is the newest window, so it follows new commits. `from` may be -1: the commit before the
@@ -84,14 +95,10 @@ export const resolveStart = (start: number, count: number, total: number): numbe
  */
 export const revealStart = (start: number, from: number, to: number, count: number, total: number): number => {
   const current = resolveStart(start, count, total)
-  const older = Math.max(0, from)
-  const next =
-    older >= current && to <= current + count - 1
-      ? current
-      : to - older + 1 > count
-        ? to - count + 1
-        : Math.round((older + to + 1 - count) / 2)
-  const clamped = clampStart(next, count, total)
 
-  return clamped === Math.max(0, total - count) ? -1 : clamped
+  if (Math.max(0, from) >= current && to <= current + count - 1) {
+    return current === Math.max(0, total - count) ? -1 : current
+  }
+
+  return centreStart(from, to, count, total)
 }

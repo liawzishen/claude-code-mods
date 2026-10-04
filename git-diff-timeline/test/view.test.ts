@@ -5,6 +5,7 @@ import type { CardNode } from '../hooks/card'
 import {
   ARROW_W,
   SLOT_W,
+  centreStart,
   dayLabels,
   formatDate,
   formatTime,
@@ -41,6 +42,13 @@ describe('layout', () => {
     expect(resolveStart(99, 5, 12)).toBe(7)
     expect(resolveStart(2, 5, 12)).toBe(2)
     expect(resolveStart(-1, 5, 3)).toBe(0)
+  })
+
+  test('the wheel’s window centres the pick, or its newer end when too wide, and follows the newest at the end', () => {
+    expect(centreStart(5, 6, 5, 20)).toBe(4)
+    expect(centreStart(0, 9, 5, 20)).toBe(5)
+    expect(centreStart(-1, 0, 5, 20)).toBe(0)
+    expect(centreStart(18, 19, 5, 20)).toBe(-1)
   })
 
   test('the window stays while the pick is in view, else centres on it, or on its newer end when too wide', () => {

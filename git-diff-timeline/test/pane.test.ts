@@ -271,6 +271,73 @@ describe('the strip above the prompt', () => {
     answer()
   })
 
+  test('the wheel over the strip moves the comparison a commit a tick, and reads the diff once the wheel rests', async ($, on) => {
+    const clock = mock.clock(on)
+    const { diffs } = world(on, { isDirty: true })
+
+    await $.command.run(GITDIFF)
+
+    const band = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: BAND, viewport: { columns: 120, rows: 30 } })
+    const ends = async () => [(await band.find({ key: 'from' }))?.props.value, (await band.find({ key: 'to' }))?.props.value]
+    // The person's wheel over the band, the strip fitting it whole.
+    const wheel = (by: number) =>
+      $.ui.scroll({ component: 'AbovePrompt', requestId: 'band', offset: 0, by, bodyRows: 12, contentRows: 8, origin: { kind: 'person' } })
+
+    // Toward the top: older. Answered, so the band's own window does not move.
+    expect(await wheel(-1)).toEqual({})
+    expect(await ends()).toEqual([sha(4), sha(5)])
+
+    const before = diffs.length
+
+    await wheel(-2)
+
+    expect(await ends()).toEqual([sha(2), sha(3)])
+    // The diff waits for the wheel to rest.
+    expect(diffs.length).toBe(before)
+
+    await clock.advance(250)
+
+    expect(diffs.length).toBeGreaterThan(before)
+
+    // A fast spin moves three commits at most, and the comparison stops at the newest.
+    await wheel(10)
+
+    expect(await ends()).toEqual([sha(5), 'working'])
+
+    await wheel(1)
+
+    expect(await ends()).toEqual([sha(5), 'working'])
+  })
+
+  test('the wheel scrolls the band as before when the strip is taller than it, and in Branches', async ($, on) => {
+    let engineScrolls = 0
+
+    // Beneath the plugin: the engine moving the band's own window.
+    on('ui.scroll', () => {
+      engineScrolls += 1
+
+      return {}
+    })
+    world(on, { isDirty: true })
+    await $.command.run(GITDIFF)
+
+    const band = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', component: 'AbovePrompt', props: BAND, viewport: { columns: 120, rows: 30 } })
+    const wheel = (by: number, contentRows: number) =>
+      $.ui.scroll({ component: 'AbovePrompt', requestId: 'band', offset: 0, by, bodyRows: 4, contentRows, origin: { kind: 'person' } })
+
+    // Taller than the band: the wheel is the engine's, or the person could not reach the strip's end.
+    await wheel(1, 9)
+
+    expect(engineScrolls).toBe(1)
+    expect(await band.find({ key: 'to' })).toMatchObject({ props: { value: 'working' } })
+
+    await band.press({ key: 'mode:branches' })
+    await wheel(-1, 4)
+
+    expect(engineScrolls).toBe(2)
+    expect(await band.find({ key: 'branch-base' })).toMatchObject({ props: { value: 'origin/main' } })
+  })
+
   test('a press that fails says why on the strip, instead of doing nothing', async ($, on) => {
     let isGone = false
 
